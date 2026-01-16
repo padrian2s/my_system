@@ -1,0 +1,5 @@
+#!/bin/bash
+# lstime - Shell wrapper for the lstime TUI tool
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec uv run "$SCRIPT_DIR/lstime.py" "$@"
