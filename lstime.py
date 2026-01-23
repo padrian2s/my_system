@@ -989,7 +989,7 @@ Rules:
             ("/", "start_search", "Search"),
             Binding("home", "go_first", "First", priority=True),
             Binding("end", "go_last", "Last", priority=True),
-            Binding("enter", "enter_dir", "Enter", priority=True),
+            ("enter", "enter_dir", "Enter"),
         ]
 
         CSS = """
@@ -1746,7 +1746,7 @@ Rules:
             Binding("ctrl+f", "fzf_files", "Find", priority=True),
             Binding("/", "fzf_grep", "Grep", priority=True),
             Binding("tab", "toggle_focus", "Switch"),
-            Binding("enter", "enter_dir", "Enter", priority=True),
+            ("enter", "enter_dir", "Enter"),
             Binding("backspace", "go_parent", "Parent"),
             Binding("d", "delete_item", "Delete"),
             Binding("R", "rename_item", "Rename"),
