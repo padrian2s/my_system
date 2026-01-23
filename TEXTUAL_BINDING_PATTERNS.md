@@ -1,6 +1,6 @@
 # Textual Key Binding Patterns for Multi-Screen Apps
 
-## Problem
+## Problem 1: Key Conflicts Between App and Screen
 
 When building a Textual application with multiple screens (e.g., a main view and a file manager screen), key bindings can conflict between the App and Screen levels.
 
@@ -8,28 +8,8 @@ When building a Textual application with multiple screens (e.g., a main view and
 
 1. **Keys not captured**: A key binding defined on a Screen doesn't work because the parent App's binding intercepts it first.
 2. **Wrong handler called**: Pressing a key on a pushed Screen triggers the App's handler instead of the Screen's handler.
-3. **Input widgets blocked**: Modal dialogs with Input widgets can't receive Enter key because the App captures it.
 
-## Root Cause
-
-Textual's binding resolution follows a hierarchy. When `priority=True` is set on a binding:
-- It takes precedence over widget-level key handling
-- App-level priority bindings can intercept keys before they reach pushed Screens
-
-## Solution Pattern
-
-### 1. Use `priority=True` for App Bindings That Must Work Globally
-
-```python
-class MyApp(App):
-    BINDINGS = [
-        Binding("enter", "enter_dir", "Enter", priority=True),
-        Binding("home", "go_first", "First", priority=True),
-        Binding("end", "go_last", "Last", priority=True),
-    ]
-```
-
-### 2. Delegate to Active Screen in App Actions
+### Solution: Delegation Pattern
 
 Check if the current screen is a specific type and delegate:
 
@@ -40,60 +20,80 @@ def action_enter_dir(self) -> None:
         return
     # App's own handling
     ...
-
-def action_go_first(self) -> None:
-    if isinstance(self.screen, DualPanelScreen):
-        self.screen.action_go_first()
-        return
-    # App's own handling
-    ...
 ```
 
-### 3. Modal Dialogs Need Priority Bindings Too
+---
 
-For ModalScreen subclasses with Input widgets, add priority enter binding:
+## Problem 2: Modal Dialogs and Key Event Bubbling
+
+When using Textual's modal screens (ModalScreen), key bindings with `priority=True` on the parent App can capture keys BEFORE the modal dialog processes them.
+
+### Symptoms
+
+- Pressing Enter in a dialog's Input field navigates directories in the main view
+- Pressing keys meant for the dialog triggers actions on the parent screen
+- Dialog appears to "do nothing" because parent consumed the event
+
+### Solution: Three-Part Fix
+
+#### 1. Dialog Input Handlers MUST Stop Event Propagation
 
 ```python
-class RenameDialog(ModalScreen):
+def on_input_submitted(self, event: Input.Submitted):
+    event.stop()  # CRITICAL: Stop event from bubbling
+    self.action_submit()
+```
+
+#### 2. Dialog Bindings Should Have Priority
+
+```python
+class MyDialog(ModalScreen):
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
-        Binding("enter", "submit", "Submit", priority=True),
+        Binding("enter", "confirm", "Yes", priority=True),  # priority=True
     ]
-
-    def on_input_submitted(self, event: Input.Submitted):
-        self.action_submit()
-
-    def action_submit(self):
-        input_widget = self.query_one("#my-input", Input)
-        value = input_widget.value.strip()
-        # Process value...
-        self.dismiss(value)
 ```
 
-### 4. Screen Bindings Can Mirror App Bindings
-
-Define the same bindings on both App and Screen, with Screen methods handling screen-specific logic:
+#### 3. Parent View Bindings Should NOT Have Priority for Conflicting Keys
 
 ```python
-class DualPanelScreen(Screen):
+class MyApp(App):
     BINDINGS = [
-        Binding("home", "go_first", "First", priority=True),
-        Binding("end", "go_last", "Last", priority=True),
-        Binding("enter", "enter_dir", "Enter", priority=True),
+        ("enter", "enter_dir", "Enter"),  # NO priority=True for Enter!
+        Binding("ctrl+f", "find", "Find", priority=True),  # OK for non-conflicting keys
     ]
-
-    def action_go_first(self):
-        list_view = self.query_one(f"#{self.active_panel}-list", ListView)
-        if list_view.children:
-            list_view.index = 0
-            list_view.scroll_home(animate=False)
 ```
 
-## Summary
+#### 4. Safety Check in Parent Actions (Belt and Suspenders)
 
-| Scenario | Solution |
-|----------|----------|
-| App key doesn't work on DataTable/ListView | Add `priority=True` to App binding |
-| Screen key captured by App | App's action checks `isinstance(self.screen, ...)` and delegates |
-| Modal Input can't receive Enter | Add `Binding("enter", "submit", priority=True)` to dialog |
-| Need same key on App and Screen | Define on both + use delegation pattern |
+```python
+def action_enter_dir(self) -> None:
+    # Don't navigate if a modal dialog is open
+    if isinstance(self.screen, ModalScreen):
+        return
+    # ... rest of action
+```
+
+---
+
+## Key Rules Summary
+
+| Rule | Why |
+|------|-----|
+| Dialogs use `priority=True` | So they capture keys before parent |
+| Parents DON'T use `priority=True` for Enter/Escape | So dialogs can handle these first |
+| Always `event.stop()` in input handlers | Prevents event bubbling to parent |
+| Check `isinstance(self.screen, ModalScreen)` | Safety net in parent actions |
+
+## Common Conflicting Keys
+
+- `Enter` - Confirmation in dialogs AND navigation in file managers
+- `Escape` - Close dialogs AND other parent actions
+- `y/n` - Confirmation dialogs
+
+## Testing Checklist
+
+- [ ] Press Enter in dialog Input - should submit, not affect parent
+- [ ] Press Enter on confirmation dialog - should confirm, not navigate
+- [ ] Press Escape in dialog - should close dialog only
+- [ ] After dialog closes, Enter should work normally for navigation
