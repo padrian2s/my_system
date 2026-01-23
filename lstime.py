@@ -1115,7 +1115,52 @@ Rules:
                 with Vertical(id="progress-container"):
                     yield Static("", id="progress-text")
                     yield ProgressBar(id="progress-bar", total=100)
-                yield Label("/search  Space:sel  v:view  c:copy  r:ren  d:del  a:all  s:sort  h:home  i:sync  g:jump", id="help-bar")
+                yield Label(self._get_help_bar_text(), id="help-bar")
+
+        HELP_SHORTCUTS = [
+            ("/", "search"),
+            ("Space", "sel"),
+            ("v", "view"),
+            ("c", "copy"),
+            ("r", "ren"),
+            ("d", "del"),
+            ("a", "all"),
+            ("s", "sort"),
+            ("h", "home"),
+            ("i", "sync"),
+            ("g", "jump"),
+        ]
+
+        def _get_help_bar_text(self, highlight_key: str = None) -> Text:
+            """Generate help bar text with optional key highlighting."""
+            text = Text()
+            for i, (key, label) in enumerate(self.HELP_SHORTCUTS):
+                if i > 0:
+                    text.append("  ")
+                if highlight_key and key.lower() == highlight_key.lower():
+                    text.append(f"{key}:", style="bold reverse")
+                    text.append(label, style="bold reverse")
+                else:
+                    text.append(f"{key}:", style="dim")
+                    text.append(label)
+            return text
+
+        def _highlight_shortcut(self, key: str):
+            """Highlight a shortcut key in the help bar temporarily."""
+            try:
+                help_bar = self.query_one("#help-bar", Label)
+                help_bar.update(self._get_help_bar_text(key))
+                self.set_timer(0.3, self._reset_help_bar)
+            except Exception:
+                pass
+
+        def _reset_help_bar(self):
+            """Reset help bar to normal state."""
+            try:
+                help_bar = self.query_one("#help-bar", Label)
+                help_bar.update(self._get_help_bar_text())
+            except Exception:
+                pass
 
         def on_mount(self):
             self.refresh_panels()
@@ -1170,16 +1215,29 @@ Rules:
                 else:
                     all_items = [p for p in path.iterdir() if not p.name.startswith(".")]
 
+                # Sort: dot directories first, then normal directories, then files
                 if sort_by_date:
                     def sort_key(p):
+                        is_dir = p.is_dir()
+                        is_dot = p.name.startswith(".")
+                        if is_dir:
+                            group = 0 if is_dot else 1
+                        else:
+                            group = 2
                         try:
                             atime = p.stat().st_atime
                         except:
                             atime = 0
-                        return (not p.is_dir(), -atime)
+                        return (group, -atime)
                 else:
                     def sort_key(p):
-                        return (not p.is_dir(), p.name.lower())
+                        is_dir = p.is_dir()
+                        is_dot = p.name.startswith(".")
+                        if is_dir:
+                            group = 0 if is_dot else 1
+                        else:
+                            group = 2
+                        return (group, p.name.lower())
 
                 items = sorted(all_items, key=sort_key)
                 for item in items:
@@ -1225,6 +1283,7 @@ Rules:
                 self.action_close()
 
         def action_start_search(self):
+            self._highlight_shortcut("/")
             path = self.left_path if self.active_panel == "left" else self.right_path
             with self.app.suspend():
                 if self.show_hidden:
@@ -1261,6 +1320,7 @@ Rules:
             list_view.focus()
 
         def action_toggle_sort(self):
+            self._highlight_shortcut("s")
             if self.active_panel == "left":
                 self.sort_left = not self.sort_left
                 DualPanelScreen._session_sort_left = self.sort_left
@@ -1278,6 +1338,7 @@ Rules:
                 self.query_one("#left-list", ListView).focus()
 
         def action_toggle_select(self):
+            self._highlight_shortcut("space")
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
             selected = self.selected_left if self.active_panel == "left" else self.selected_right
 
@@ -1342,6 +1403,7 @@ Rules:
             self._save_paths_to_config()
 
         def action_go_home(self):
+            self._highlight_shortcut("h")
             home_path = DualPanelScreen._initial_start_path or Path.cwd()
             if self.active_panel == "left":
                 self.left_path = home_path
@@ -1356,6 +1418,7 @@ Rules:
             self.notify(f"Home: {home_path}", timeout=1)
 
         def action_sync_panels(self):
+            self._highlight_shortcut("i")
             if self.active_panel == "left":
                 self.right_path = self.left_path
                 self.selected_right.clear()
@@ -1370,6 +1433,7 @@ Rules:
             self.notify("Synced panels", timeout=1)
 
         def action_select_all(self):
+            self._highlight_shortcut("a")
             path = self.left_path if self.active_panel == "left" else self.right_path
             selected = self.selected_left if self.active_panel == "left" else self.selected_right
             try:
@@ -1383,6 +1447,7 @@ Rules:
             self._refresh_single_panel(self.active_panel)
 
         def action_toggle_position(self):
+            self._highlight_shortcut("g")
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
             if list_view.children:
                 current = list_view.index if list_view.index is not None else 0
@@ -1425,6 +1490,7 @@ Rules:
                 list_view.focus()
 
         def action_copy_selected(self):
+            self._highlight_shortcut("c")
             if self.copying:
                 return
 
@@ -1513,6 +1579,7 @@ Rules:
             self.set_timer(2, lambda: progress_container.remove_class("visible"))
 
         def action_rename(self):
+            self._highlight_shortcut("r")
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
             if not list_view.highlighted_child:
                 self.notify("No item to rename", timeout=2)
@@ -1543,6 +1610,7 @@ Rules:
             self.app.push_screen(RenameDialog(path.name), handle_rename)
 
         def action_delete(self):
+            self._highlight_shortcut("d")
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
             current_index = list_view.index
 
@@ -1596,6 +1664,7 @@ Rules:
             self.app.push_screen(ConfirmDialog("Delete", message), handle_confirm)
 
         def action_view_file(self):
+            self._highlight_shortcut("v")
             for screen in self.app.screen_stack:
                 if isinstance(screen, FileViewerScreen):
                     screen.dismiss()
@@ -1783,7 +1852,54 @@ Rules:
                 preview_panel.border_title = "Preview"
                 with preview_panel:
                     yield FileViewer(id="file-viewer")
-            yield Label("^F:find  /:grep  !:AI  m:manager  v:view  t:time  r:rev  h:hidden  f:full  g:jump  d:del  R:ren  q:quit", id="help-bar")
+            yield Label(self._get_help_bar_text(), id="help-bar")
+
+        HELP_SHORTCUTS = [
+            ("^F", "find"),
+            ("/", "grep"),
+            ("!", "AI"),
+            ("m", "manager"),
+            ("v", "view"),
+            ("t", "time"),
+            ("r", "rev"),
+            ("h", "hidden"),
+            ("f", "full"),
+            ("g", "jump"),
+            ("d", "del"),
+            ("R", "ren"),
+            ("q", "quit"),
+        ]
+
+        def _get_help_bar_text(self, highlight_key: str = None) -> Text:
+            """Generate help bar text with optional key highlighting."""
+            text = Text()
+            for i, (key, label) in enumerate(self.HELP_SHORTCUTS):
+                if i > 0:
+                    text.append("  ")
+                if highlight_key and key.lower() == highlight_key.lower():
+                    text.append(f"{key}:", style="bold reverse")
+                    text.append(label, style="bold reverse")
+                else:
+                    text.append(f"{key}:", style="dim")
+                    text.append(label)
+            return text
+
+        def _highlight_shortcut(self, key: str):
+            """Highlight a shortcut key in the help bar temporarily."""
+            try:
+                help_bar = self.query_one("#help-bar", Label)
+                help_bar.update(self._get_help_bar_text(key))
+                self.set_timer(0.3, self._reset_help_bar)
+            except Exception:
+                pass
+
+        def _reset_help_bar(self):
+            """Reset help bar to normal state."""
+            try:
+                help_bar = self.query_one("#help-bar", Label)
+                help_bar.update(self._get_help_bar_text())
+            except Exception:
+                pass
 
         def on_mount(self) -> None:
             self.load_entries()
@@ -1809,13 +1925,21 @@ Rules:
             if not self.show_hidden:
                 entries = [e for e in entries if not e.name.startswith('.')]
 
-            # Sort with directories first, then files, each group sorted by time
-            if self.sort_by == "created":
-                entries = sorted(entries, key=lambda e: (not e.is_dir, e.created), reverse=self.reverse_order)
-            else:
-                entries = sorted(entries, key=lambda e: (not e.is_dir, e.accessed), reverse=self.reverse_order)
-            # Re-sort to ensure directories always come first regardless of reverse order
-            entries = sorted(entries, key=lambda e: not e.is_dir)
+            # Sort: dot directories first, then normal directories, then files
+            def sort_key(e):
+                is_dot = e.name.startswith(".")
+                if e.is_dir:
+                    group = 0 if is_dot else 1
+                else:
+                    group = 2
+                time_val = e.created if self.sort_by == "created" else e.accessed
+                timestamp = time_val.timestamp()
+                if self.reverse_order:
+                    return (group, -timestamp)
+                else:
+                    return (group, timestamp)
+
+            entries = sorted(entries, key=sort_key)
 
             self._visible_entries = entries
 
@@ -1872,6 +1996,7 @@ Rules:
             save_config(config)
 
         def action_toggle_time(self) -> None:
+            self._highlight_shortcut("t")
             self.sort_by = "accessed" if self.sort_by == "created" else "created"
             self.refresh_table()
 
@@ -1884,10 +2009,12 @@ Rules:
             self.refresh_table()
 
         def action_reverse(self) -> None:
+            self._highlight_shortcut("r")
             self.reverse_order = not self.reverse_order
             self.refresh_table()
 
         def action_toggle_hidden(self) -> None:
+            self._highlight_shortcut("h")
             self.show_hidden = not self.show_hidden
             self._save_config()
             self.refresh_table()
@@ -1933,6 +2060,7 @@ Rules:
                 self._save_config()
 
         def action_toggle_fullscreen(self) -> None:
+            self._highlight_shortcut("f")
             table = self.query_one("#file-table", DataTable)
             viewer = self.query_one("#file-viewer", FileViewer)
 
@@ -1955,6 +2083,7 @@ Rules:
             self._apply_panel_widths()
 
         def action_toggle_position(self) -> None:
+            self._highlight_shortcut("g")
             table = self.query_one("#file-table", DataTable)
             if self._visible_entries:
                 current = table.cursor_row if table.cursor_row is not None else 0
@@ -1988,9 +2117,11 @@ Rules:
                 table.focus()
 
         def action_file_manager(self) -> None:
+            self._highlight_shortcut("m")
             self.push_screen(DualPanelScreen(self.path))
 
         def action_view_file(self) -> None:
+            self._highlight_shortcut("v")
             table = self.query_one("#file-table", DataTable)
             if table.cursor_row is not None and self._visible_entries:
                 entry = self._visible_entries[table.cursor_row]
@@ -2000,6 +2131,7 @@ Rules:
                     self.notify("Cannot view directory", timeout=2)
 
         def action_fzf_files(self) -> None:
+            self._highlight_shortcut("^F")
             with self.suspend():
                 fd_check = subprocess.run(["which", "fd"], capture_output=True)
                 if fd_check.returncode == 0:
@@ -2027,6 +2159,7 @@ Rules:
                     self.notify(f"Opened: {path.name}", timeout=1)
 
         def action_fzf_grep(self) -> None:
+            self._highlight_shortcut("/")
             with self.suspend():
                 result = subprocess.run(
                     f'rg -n --color=always "" "{self.path}" 2>/dev/null | fzf --ansi --preview "echo {{}} | cut -d: -f1 | xargs head -100"',
@@ -2087,6 +2220,7 @@ Rules:
                 self.notify(f"/{self.path.name or self.path}", timeout=1)
 
         def action_delete_item(self) -> None:
+            self._highlight_shortcut("d")
             table = self.query_one("#file-table", DataTable)
             if table.cursor_row is None or not self._visible_entries:
                 self.notify("No item selected", timeout=2)
@@ -2116,6 +2250,7 @@ Rules:
             self.push_screen(ConfirmDialog("Delete", message), handle_confirm)
 
         def action_rename_item(self) -> None:
+            self._highlight_shortcut("R")
             table = self.query_one("#file-table", DataTable)
             if table.cursor_row is None or not self._visible_entries:
                 self.notify("No item selected", timeout=2)
@@ -2149,6 +2284,7 @@ Rules:
                 self.notify(f"Opened: {entry.name}", timeout=1)
 
         def action_ai_shell(self) -> None:
+            self._highlight_shortcut("!")
             def handle_result(result: Path | None):
                 if result:
                     self.notify(f"Saved: {result.name}", timeout=2)
