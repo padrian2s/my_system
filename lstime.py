@@ -450,6 +450,7 @@ if HAS_TEXTUAL:
             self._refresh_results()
 
         def on_input_submitted(self, event: Input.Submitted):
+            event.stop()
             self.action_submit()
 
         def action_submit(self):
@@ -594,6 +595,7 @@ if HAS_TEXTUAL:
                 input_widget.selection = (0, len(name))
 
         def on_input_submitted(self, event: Input.Submitted):
+            event.stop()
             self.action_submit()
 
         def action_submit(self):
@@ -687,6 +689,7 @@ if HAS_TEXTUAL:
             self.query_one("#prompt-input", Input).focus()
 
         def on_input_submitted(self, event: Input.Submitted):
+            event.stop()
             self.action_submit()
 
         def action_submit(self):
