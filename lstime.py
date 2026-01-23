@@ -485,6 +485,7 @@ if HAS_TEXTUAL:
 
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
+            ("enter", "confirm", "Yes"),
             ("y", "confirm", "Yes"),
             ("n", "cancel", "No"),
         ]
@@ -522,7 +523,7 @@ if HAS_TEXTUAL:
         def compose(self) -> ComposeResult:
             dialog = Vertical(id="confirm-dialog")
             dialog.border_title = self.dialog_title
-            dialog.border_subtitle = "y:Yes  n:No  Esc:Cancel"
+            dialog.border_subtitle = "y/Enter:Yes  Esc:Cancel"
             with dialog:
                 yield Label(self.message, id="confirm-message")
 
