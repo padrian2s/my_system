@@ -894,6 +894,7 @@ Rules:
 
         BINDINGS = [
             ("escape", "close", "Close"),
+            ("enter", "close", "Close"),
             ("q", "close", "Close"),
             ("v", "close", "Close"),
         ]
@@ -937,7 +938,7 @@ Rules:
         def compose(self) -> ComposeResult:
             container = Vertical(id="viewer-container")
             container.border_title = f"{self.file_path.name}"
-            container.border_subtitle = "v/q/Esc:Close"
+            container.border_subtitle = "Enter/q/Esc:Close"
             with container:
                 yield FileViewer(id="viewer-content")
 
