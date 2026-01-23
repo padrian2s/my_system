@@ -2130,6 +2130,14 @@ Rules:
                 pass
             self.exit()
 
+        def action_quit(self) -> None:
+            """Quit and save current directory for shell cd."""
+            try:
+                LASTDIR_FILE.write_text(str(self.path))
+            except OSError:
+                pass
+            self.exit()
+
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             self.update_preview(event.cursor_row)
 
