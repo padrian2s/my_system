@@ -2052,6 +2052,9 @@ Rules:
                         self.notify(f"Opened: {file_path.name}:{parts[1]}", timeout=1)
 
         def action_enter_dir(self) -> None:
+            # Don't navigate if a modal dialog is open
+            if isinstance(self.screen, ModalScreen):
+                return
             if isinstance(self.screen, DualPanelScreen):
                 self.screen.action_enter_dir()
                 return
