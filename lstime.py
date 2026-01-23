@@ -38,6 +38,7 @@ Keyboard shortcuts:
   ! - AI Shell helper (generate shell script with Claude)
   Ctrl+R - Refresh directory listing
   q - Quit
+  Q - Quit and sync shell to current directory
 """
 
 import json
@@ -54,6 +55,7 @@ from typing import NamedTuple
 # Config file for persisting settings
 CONFIG_PATH = Path.home() / ".config" / "lstime" / "config.json"
 SESSION_PATHS_FILE = Path.home() / ".config" / "lstime" / "session_paths.json"
+LASTDIR_FILE = Path(f"/tmp/lstime_lastdir_{os.getenv('USER', 'user')}")
 
 
 def load_config() -> dict:
@@ -315,24 +317,25 @@ if HAS_TEXTUAL:
             self.is_parent = is_parent
 
         def compose(self) -> ComposeResult:
-            yield Static(self._render_content(), id="item-content", markup=False)
+            yield Static(self._render_content(), id="item-content")
 
         def _render_content(self) -> str:
             if self.is_parent:
-                return "  /.."
+                return "  [bold cyan]/..[/]"
 
             is_dir = self.path.is_dir()
             mark = "*" if self.is_selected else " "
             name = self.path.name or str(self.path)
-            if is_dir:
-                name = "/" + name
 
             try:
                 size = "" if is_dir else format_size(self.path.stat().st_size)
             except:
                 size = ""
 
-            return f"{mark} {name:<35} {size}"
+            if is_dir:
+                return f"{mark} [bold cyan]/{name:<34}[/] {size}"
+            else:
+                return f"{mark} {name:<35} {size}"
 
         def update_selection(self, is_selected: bool):
             """Update selection state without full refresh."""
@@ -367,6 +370,7 @@ if HAS_TEXTUAL:
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
             ("tab", "select_first", "Select First"),
+            Binding("enter", "submit", "Submit", priority=True),
         ]
 
         CSS = """
@@ -446,6 +450,9 @@ if HAS_TEXTUAL:
             self._refresh_results()
 
         def on_input_submitted(self, event: Input.Submitted):
+            self.action_submit()
+
+        def action_submit(self):
             results = self.query_one("#search-results", ListView)
             if results.children:
                 results.index = 0
@@ -531,6 +538,7 @@ if HAS_TEXTUAL:
 
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
+            Binding("enter", "submit", "Submit", priority=True),
         ]
 
         CSS = """
@@ -585,7 +593,11 @@ if HAS_TEXTUAL:
                 input_widget.selection = (0, len(name))
 
         def on_input_submitted(self, event: Input.Submitted):
-            new_name = event.value.strip()
+            self.action_submit()
+
+        def action_submit(self):
+            input_widget = self.query_one("#rename-input", Input)
+            new_name = input_widget.value.strip()
             if new_name and new_name != self.current_name:
                 self.dismiss(new_name)
             else:
@@ -606,6 +618,7 @@ if HAS_TEXTUAL:
             ("escape", "cancel", "Cancel"),
             ("ctrl+s", "save_script", "Save"),
             ("ctrl+y", "copy_clipboard", "Copy"),
+            Binding("enter", "submit", "Submit", priority=True),
         ]
 
         CSS = """
@@ -673,9 +686,13 @@ if HAS_TEXTUAL:
             self.query_one("#prompt-input", Input).focus()
 
         def on_input_submitted(self, event: Input.Submitted):
+            self.action_submit()
+
+        def action_submit(self):
             if self.is_generating:
                 return
-            prompt = event.value.strip()
+            input_widget = self.query_one("#prompt-input", Input)
+            prompt = input_widget.value.strip()
             if prompt:
                 self.generate_script(prompt)
 
@@ -965,6 +982,9 @@ Rules:
             ("i", "sync_panels", "Sync"),
             ("v", "view_file", "View"),
             ("/", "start_search", "Search"),
+            Binding("home", "go_first", "First", priority=True),
+            Binding("end", "go_last", "Last", priority=True),
+            Binding("enter", "enter_dir", "Enter", priority=True),
         ]
 
         CSS = """
@@ -1268,6 +1288,22 @@ Rules:
                     if list_view.index < len(list_view.children) - 1:
                         list_view.index += 1
 
+        def action_enter_dir(self):
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            if list_view.highlighted_child and isinstance(list_view.highlighted_child, FileItem):
+                item = list_view.highlighted_child
+                if item.path.is_dir():
+                    if self.active_panel == "left":
+                        self.left_path = item.path
+                        self.selected_left.clear()
+                        DualPanelScreen._session_left_path = item.path
+                    else:
+                        self.right_path = item.path
+                        self.selected_right.clear()
+                        DualPanelScreen._session_right_path = item.path
+                    self._refresh_single_panel(self.active_panel)
+                    self._save_paths_to_config()
+
         def on_list_view_selected(self, event: ListView.Selected):
             if isinstance(event.item, FileItem):
                 item = event.item
@@ -1367,6 +1403,20 @@ Rules:
                 current = list_view.index if list_view.index is not None else 0
                 page_size = max(1, list_view.size.height - 2)
                 list_view.index = min(len(list_view.children) - 1, current + page_size)
+                list_view.focus()
+
+        def action_go_first(self):
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            if list_view.children:
+                list_view.index = 0
+                list_view.scroll_home(animate=False)
+                list_view.focus()
+
+        def action_go_last(self):
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            if list_view.children:
+                list_view.index = len(list_view.children) - 1
+                list_view.scroll_end(animate=False)
                 list_view.focus()
 
         def action_copy_selected(self):
@@ -1646,6 +1696,7 @@ Rules:
 
         BINDINGS = [
             Binding("q", "quit", "Quit"),
+            Binding("Q", "quit_cd", "Quit+CD"),
             Binding("t", "toggle_time", "Toggle Time"),
             Binding("c", "sort_created", "Created"),
             Binding("a", "sort_accessed", "Accessed"),
@@ -1669,6 +1720,8 @@ Rules:
             Binding("o", "open_system", "Open"),
             Binding("!", "ai_shell", "AI Shell"),
             Binding("ctrl+r", "refresh", "Refresh"),
+            Binding("home", "go_first", "First", priority=True),
+            Binding("end", "go_last", "Last", priority=True),
         ]
 
         preview_width = reactive(30)
@@ -1723,10 +1776,13 @@ Rules:
             if not self.show_hidden:
                 entries = [e for e in entries if not e.name.startswith('.')]
 
+            # Sort with directories first, then files, each group sorted by time
             if self.sort_by == "created":
-                entries = sorted(entries, key=lambda e: e.created, reverse=self.reverse_order)
+                entries = sorted(entries, key=lambda e: (not e.is_dir, e.created), reverse=self.reverse_order)
             else:
-                entries = sorted(entries, key=lambda e: e.accessed, reverse=self.reverse_order)
+                entries = sorted(entries, key=lambda e: (not e.is_dir, e.accessed), reverse=self.reverse_order)
+            # Re-sort to ensure directories always come first regardless of reverse order
+            entries = sorted(entries, key=lambda e: not e.is_dir)
 
             self._visible_entries = entries
 
@@ -1874,6 +1930,22 @@ Rules:
                 else:
                     table.move_cursor(row=0)
 
+        def action_go_first(self) -> None:
+            if isinstance(self.screen, DualPanelScreen):
+                self.screen.action_go_first()
+                return
+            table = self.query_one("#file-table", DataTable)
+            if self._visible_entries:
+                table.move_cursor(row=0)
+
+        def action_go_last(self) -> None:
+            if isinstance(self.screen, DualPanelScreen):
+                self.screen.action_go_last()
+                return
+            table = self.query_one("#file-table", DataTable)
+            if self._visible_entries:
+                table.move_cursor(row=len(self._visible_entries) - 1)
+
         def action_toggle_focus(self) -> None:
             table = self.query_one("#file-table", DataTable)
             viewer = self.query_one("#file-viewer", FileViewer)
@@ -1947,6 +2019,9 @@ Rules:
                         self.notify(f"Opened: {file_path.name}:{parts[1]}", timeout=1)
 
         def action_enter_dir(self) -> None:
+            if isinstance(self.screen, DualPanelScreen):
+                self.screen.action_enter_dir()
+                return
             table = self.query_one("#file-table", DataTable)
             if table.cursor_row is not None and self._visible_entries:
                 entry = self._visible_entries[table.cursor_row]
@@ -2047,6 +2122,14 @@ Rules:
                 table.move_cursor(row=min(current_row, len(self._visible_entries) - 1))
             self.notify("Refreshed", timeout=1)
 
+        def action_quit_cd(self) -> None:
+            """Quit and write current directory to temp file for shell to cd."""
+            try:
+                LASTDIR_FILE.write_text(str(self.path))
+            except OSError:
+                pass
+            self.exit()
+
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             self.update_preview(event.cursor_row)
 
@@ -2081,10 +2164,13 @@ Rules:
                     entries = get_dir_entries(p)
                     if not self.show_hidden:
                         entries = [e for e in entries if not e.name.startswith('.')]
+                    # Sort with directories first, then files, each group sorted by time
                     if self.sort_by == "created":
                         entries = sorted(entries, key=lambda e: e.created, reverse=self.reverse_order)
                     else:
                         entries = sorted(entries, key=lambda e: e.accessed, reverse=self.reverse_order)
+                    # Stable sort: directories first, preserving time order within each group
+                    entries = sorted(entries, key=lambda e: not e.is_dir)
 
                     for i, entry in enumerate(entries):
                         if count[0] >= max_items:
