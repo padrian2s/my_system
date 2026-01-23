@@ -2026,6 +2026,11 @@ Rules:
             if table.cursor_row is not None and self._visible_entries:
                 entry = self._visible_entries[table.cursor_row]
                 if entry.is_dir:
+                    if not entry.path.exists():
+                        self.notify(f"Directory no longer exists: {entry.name}", timeout=2)
+                        self.load_entries()
+                        self.refresh_table()
+                        return
                     self.path = entry.path
                     self.load_entries()
                     self.refresh_table()
