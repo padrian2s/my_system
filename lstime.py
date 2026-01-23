@@ -1479,6 +1479,12 @@ Rules:
             progress_text = self.query_one("#progress-text", Static)
             progress_container = self.query_one("#progress-container")
 
+            # Save cursor positions before refresh
+            left_list = self.query_one("#left-list", ListView)
+            right_list = self.query_one("#right-list", ListView)
+            left_index = left_list.index
+            right_index = right_list.index
+
             progress_bar.update(progress=100)
             progress_text.update("Done!")
             self.notify("Copy complete!", timeout=2)
@@ -1488,6 +1494,17 @@ Rules:
                 self.selected_right.clear()
 
             self.refresh_panels()
+
+            # Restore cursor positions
+            if left_index is not None:
+                new_left = min(left_index, len(left_list.children) - 1)
+                if new_left >= 0:
+                    left_list.index = new_left
+            if right_index is not None:
+                new_right = min(right_index, len(right_list.children) - 1)
+                if new_right >= 0:
+                    right_list.index = new_right
+
             self.set_timer(2, lambda: progress_container.remove_class("visible"))
 
         def action_rename(self):
@@ -1502,6 +1519,7 @@ Rules:
                 return
 
             path = item.path
+            current_index = list_view.index
 
             def handle_rename(new_name: str | None):
                 if new_name:
@@ -1510,12 +1528,19 @@ Rules:
                         path.rename(new_path)
                         self.notify(f"Renamed to: {new_name}", timeout=2)
                         self._refresh_single_panel(self.active_panel)
+                        # Restore cursor position
+                        new_index = min(current_index, len(list_view.children) - 1)
+                        if new_index >= 0:
+                            list_view.index = new_index
                     except Exception as e:
                         self.notify(f"Error: {e}", timeout=3)
 
             self.app.push_screen(RenameDialog(path.name), handle_rename)
 
         def action_delete(self):
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            current_index = list_view.index
+
             if self.active_panel == "left":
                 selected = self.selected_left.copy()
             else:
@@ -1524,7 +1549,6 @@ Rules:
             used_explicit_selection = bool(selected)
 
             if not selected:
-                list_view = self.query_one(f"#{self.active_panel}-list", ListView)
                 if list_view.highlighted_child and isinstance(list_view.highlighted_child, FileItem):
                     item = list_view.highlighted_child
                     if not item.is_parent:
@@ -1559,6 +1583,10 @@ Rules:
                         self.selected_left.clear()
                         self.selected_right.clear()
                     self._refresh_single_panel(self.active_panel)
+                    # Restore cursor position
+                    new_index = min(current_index, len(list_view.children) - 1)
+                    if new_index >= 0:
+                        list_view.index = new_index
 
             self.app.push_screen(ConfirmDialog("Delete", message), handle_confirm)
 
@@ -2059,6 +2087,7 @@ Rules:
             entry = self._visible_entries[table.cursor_row]
             message = f"Delete '{entry.name}'?"
 
+            current_row = table.cursor_row
             def handle_confirm(confirmed: bool):
                 if confirmed:
                     try:
@@ -2069,6 +2098,10 @@ Rules:
                         self.notify(f"Deleted: {entry.name}", timeout=2)
                         self.load_entries()
                         self.refresh_table()
+                        # Restore cursor position
+                        new_row = min(current_row, len(self._visible_entries) - 1)
+                        if new_row >= 0:
+                            table.move_cursor(row=new_row)
                     except Exception as e:
                         self.notify(f"Error: {e}", timeout=3)
 
@@ -2081,6 +2114,7 @@ Rules:
                 return
 
             entry = self._visible_entries[table.cursor_row]
+            current_row = table.cursor_row
 
             def handle_rename(new_name: str | None):
                 if new_name:
@@ -2090,6 +2124,10 @@ Rules:
                         self.notify(f"Renamed to: {new_name}", timeout=2)
                         self.load_entries()
                         self.refresh_table()
+                        # Restore cursor position
+                        new_row = min(current_row, len(self._visible_entries) - 1)
+                        if new_row >= 0:
+                            table.move_cursor(row=new_row)
                     except Exception as e:
                         self.notify(f"Error: {e}", timeout=3)
 
