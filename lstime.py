@@ -485,7 +485,7 @@ if HAS_TEXTUAL:
 
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
-            ("enter", "confirm", "Yes"),
+            Binding("enter", "confirm", "Yes", priority=True),
             ("y", "confirm", "Yes"),
             ("n", "cancel", "No"),
         ]
@@ -894,7 +894,7 @@ Rules:
 
         BINDINGS = [
             ("escape", "close", "Close"),
-            ("enter", "close", "Close"),
+            Binding("enter", "close", "Close", priority=True),
             ("q", "close", "Close"),
             ("v", "close", "Close"),
         ]
