@@ -370,7 +370,7 @@ if HAS_TEXTUAL:
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
             ("tab", "select_first", "Select First"),
-            Binding("enter", "submit", "Submit", priority=True),
+            Binding("ctrl+y", "submit", "Submit", priority=True),
         ]
 
         CSS = """
@@ -450,8 +450,7 @@ if HAS_TEXTUAL:
             self._refresh_results()
 
         def on_input_submitted(self, event: Input.Submitted):
-            event.stop()
-            self.action_submit()
+            event.stop()  # Prevent Enter from bubbling
 
         def action_submit(self):
             results = self.query_one("#search-results", ListView)
@@ -486,7 +485,7 @@ if HAS_TEXTUAL:
 
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
-            Binding("enter", "confirm", "Yes", priority=True),
+            Binding("ctrl+y", "confirm", "Yes", priority=True),
             ("y", "confirm", "Yes"),
             ("n", "cancel", "No"),
         ]
@@ -524,7 +523,7 @@ if HAS_TEXTUAL:
         def compose(self) -> ComposeResult:
             dialog = Vertical(id="confirm-dialog")
             dialog.border_title = self.dialog_title
-            dialog.border_subtitle = "y/Enter:Yes  Esc:Cancel"
+            dialog.border_subtitle = "y/^Y:Yes  Esc:Cancel"
             with dialog:
                 yield Label(self.message, id="confirm-message")
 
@@ -540,7 +539,7 @@ if HAS_TEXTUAL:
 
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
-            Binding("enter", "submit", "Submit", priority=True),
+            Binding("ctrl+y", "submit", "Submit", priority=True),
         ]
 
         CSS = """
@@ -580,7 +579,7 @@ if HAS_TEXTUAL:
         def compose(self) -> ComposeResult:
             dialog = Vertical(id="rename-dialog")
             dialog.border_title = "Rename"
-            dialog.border_subtitle = "Enter:Confirm  Esc:Cancel"
+            dialog.border_subtitle = "^Y:Confirm  Esc:Cancel"
             with dialog:
                 yield Input(value=self.current_name, id="rename-input")
 
@@ -595,8 +594,7 @@ if HAS_TEXTUAL:
                 input_widget.selection = (0, len(name))
 
         def on_input_submitted(self, event: Input.Submitted):
-            event.stop()
-            self.action_submit()
+            event.stop()  # Prevent Enter from bubbling
 
         def action_submit(self):
             input_widget = self.query_one("#rename-input", Input)
@@ -620,8 +618,8 @@ if HAS_TEXTUAL:
         BINDINGS = [
             ("escape", "cancel", "Cancel"),
             ("ctrl+s", "save_script", "Save"),
-            ("ctrl+y", "copy_clipboard", "Copy"),
-            Binding("enter", "submit", "Submit", priority=True),
+            ("ctrl+c", "copy_clipboard", "Copy"),
+            Binding("ctrl+y", "submit", "Submit", priority=True),
         ]
 
         CSS = """
@@ -678,7 +676,7 @@ if HAS_TEXTUAL:
         def compose(self) -> ComposeResult:
             dialog = Vertical(id="ai-dialog")
             dialog.border_title = "AI Shell Helper"
-            dialog.border_subtitle = "Enter:Generate  ^S:Save  ^Y:Copy  Esc:Cancel"
+            dialog.border_subtitle = "^Y:Generate  ^S:Save  ^C:Copy  Esc:Cancel"
             with dialog:
                 yield Input(placeholder="Describe what you want the shell script to do...", id="prompt-input")
                 with VerticalScroll(id="response-area"):
@@ -689,8 +687,7 @@ if HAS_TEXTUAL:
             self.query_one("#prompt-input", Input).focus()
 
         def on_input_submitted(self, event: Input.Submitted):
-            event.stop()
-            self.action_submit()
+            event.stop()  # Prevent Enter from bubbling
 
         def action_submit(self):
             if self.is_generating:
@@ -978,8 +975,8 @@ Rules:
             ("c", "copy_selected", "Copy"),
             ("a", "select_all", "All"),
             ("s", "toggle_sort", "Sort"),
-            ("r", "rename", "Rename"),
-            ("d", "delete", "Delete"),
+            Binding("R", "rename", "Rename", priority=True),
+            Binding("d", "delete", "Delete", priority=True),
             Binding("g", "toggle_position", "g=jump"),
             ("pageup", "page_up", "PgUp"),
             ("pagedown", "page_down", "PgDn"),
@@ -989,7 +986,7 @@ Rules:
             ("/", "start_search", "Search"),
             Binding("home", "go_first", "First", priority=True),
             Binding("end", "go_last", "Last", priority=True),
-            ("enter", "enter_dir", "Enter"),
+            Binding("enter", "enter_dir", "Enter", priority=True),
         ]
 
         CSS = """
@@ -1815,7 +1812,7 @@ Rules:
             Binding("ctrl+f", "fzf_files", "Find", priority=True),
             Binding("/", "fzf_grep", "Grep", priority=True),
             Binding("tab", "toggle_focus", "Switch"),
-            ("enter", "enter_dir", "Enter"),
+            Binding("enter", "enter_dir", "Enter", priority=True),
             Binding("backspace", "go_parent", "Parent"),
             Binding("d", "delete_item", "Delete"),
             Binding("R", "rename_item", "Rename"),
@@ -2185,6 +2182,7 @@ Rules:
                         self.notify(f"Opened: {file_path.name}:{parts[1]}", timeout=1)
 
         def action_enter_dir(self) -> None:
+            # If DualPanelScreen is active, delegate to it
             if isinstance(self.screen, DualPanelScreen):
                 self.screen.action_enter_dir()
                 return
