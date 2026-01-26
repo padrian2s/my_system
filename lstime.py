@@ -978,6 +978,7 @@ Rules:
             Binding("R", "rename", "Rename", priority=True),
             Binding("d", "delete", "Delete", priority=True),
             Binding("g", "toggle_position", "g=jump"),
+            Binding("n", "quick_select", "n=select"),
             ("pageup", "page_up", "PgUp"),
             ("pagedown", "page_down", "PgDn"),
             ("h", "go_home", "Home"),
@@ -1096,6 +1097,8 @@ Rules:
             self.selected_right: set[Path] = set()
             self.active_panel = "left"
             self.copying = False
+            self._quick_select_mode = False
+            self._quick_select_buffer = ""
 
         def compose(self) -> ComposeResult:
             container = Vertical(id="dual-container")
@@ -1126,10 +1129,19 @@ Rules:
             ("h", "home"),
             ("i", "sync"),
             ("g", "jump"),
+            ("n", "qsel"),
         ]
 
         def _get_help_bar_text(self, highlight_key: str = None) -> Text:
             """Generate help bar text with optional key highlighting."""
+            # Show quick select mode buffer
+            if self._quick_select_mode:
+                text = Text()
+                text.append("[n:select] ", style="bold yellow")
+                text.append(self._quick_select_buffer or "_", style="bold reverse")
+                text.append("  (type to match, Enter=confirm, Esc=cancel)", style="dim")
+                return text
+            
             text = Text()
             for i, (key, label) in enumerate(self.HELP_SHORTCUTS):
                 if i > 0:
@@ -1352,6 +1364,10 @@ Rules:
                         list_view.index += 1
 
         def action_enter_dir(self):
+            # If in quick select mode, just exit the mode without entering directory
+            if self._quick_select_mode:
+                self._exit_quick_select()
+                return
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
             if list_view.highlighted_child and isinstance(list_view.highlighted_child, FileItem):
                 item = list_view.highlighted_child
@@ -1386,6 +1402,13 @@ Rules:
                     self._save_paths_to_config()
 
         def action_go_up(self):
+            # If in quick select mode, handle backspace for buffer
+            if self._quick_select_mode:
+                if self._quick_select_buffer:
+                    self._quick_select_buffer = self._quick_select_buffer[:-1]
+                    self._update_help_bar()
+                    self._quick_select_match()
+                return
             if self.active_panel == "left":
                 if self.left_path.parent != self.left_path:
                     self.left_path = self.left_path.parent
@@ -1455,6 +1478,78 @@ Rules:
                     list_view.index = 0
                     list_view.scroll_home(animate=False)
                 list_view.focus()
+
+        def action_quick_select(self) -> None:
+            """Enter quick select mode - type to jump to matching files."""
+            self._quick_select_mode = True
+            self._quick_select_buffer = ""
+            self._highlight_shortcut("n")
+            self._update_help_bar()
+
+        def _update_help_bar(self) -> None:
+            """Update the help bar display."""
+            try:
+                help_bar = self.query_one("#help-bar", Label)
+                help_bar.update(self._get_help_bar_text())
+            except Exception:
+                pass
+
+        def _quick_select_match(self) -> None:
+            """Find and move cursor to first entry matching the buffer."""
+            if not self._quick_select_buffer:
+                return
+            
+            search = self._quick_select_buffer.lower()
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            
+            for i, item in enumerate(list_view.children):
+                if isinstance(item, FileItem) and item.path.name.lower().startswith(search):
+                    list_view.index = i
+                    # Scroll to make item visible
+                    if hasattr(item, 'scroll_visible'):
+                        item.scroll_visible()
+                    return
+
+        def _exit_quick_select(self) -> None:
+            """Exit quick select mode."""
+            self._quick_select_mode = False
+            self._quick_select_buffer = ""
+            self._update_help_bar()
+
+        def on_key(self, event) -> None:
+            """Handle key events for quick select mode."""
+            if not self._quick_select_mode:
+                return
+            
+            key = event.key
+            
+            # Stop ALL events in quick select mode to prevent shortcut conflicts
+            event.stop()
+            
+            # Exit on Escape
+            if key == "escape":
+                self._exit_quick_select()
+                return
+            
+            # Confirm on Enter
+            if key == "enter":
+                self._exit_quick_select()
+                return
+            
+            # Backspace removes last character
+            if key == "backspace":
+                if self._quick_select_buffer:
+                    self._quick_select_buffer = self._quick_select_buffer[:-1]
+                    self._update_help_bar()
+                    self._quick_select_match()
+                return
+            
+            # Add printable characters to buffer
+            if len(key) == 1 and key.isprintable():
+                self._quick_select_buffer += key
+                self._update_help_bar()
+                self._quick_select_match()
+                return
 
         def action_page_up(self):
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
@@ -1807,6 +1902,7 @@ Rules:
             Binding("]", "shrink_preview", "Grow"),
             Binding("f", "toggle_fullscreen", "Fullscreen"),
             Binding("g", "toggle_position", "g=jump"),
+            Binding("n", "quick_select", "n=select"),
             Binding("m", "file_manager", "Manager"),
             Binding("v", "view_file", "View"),
             Binding("ctrl+f", "fzf_files", "Find", priority=True),
@@ -1834,6 +1930,8 @@ Rules:
             self.sort_by = "created"
             self.reverse_order = True
             self.show_hidden = False
+            self._quick_select_mode = False
+            self._quick_select_buffer = ""
             config = load_config()
             self.preview_width = config.get("preview_width", 30)
             self.show_hidden = config.get("show_hidden", False)
@@ -1862,6 +1960,7 @@ Rules:
             ("h", "hidden"),
             ("f", "full"),
             ("g", "jump"),
+            ("n", "sel"),
             ("d", "del"),
             ("R", "ren"),
             ("q", "quit"),
@@ -1869,6 +1968,14 @@ Rules:
 
         def _get_help_bar_text(self, highlight_key: str = None) -> Text:
             """Generate help bar text with optional key highlighting."""
+            # Show quick select mode buffer
+            if self._quick_select_mode:
+                text = Text()
+                text.append("[n:select] ", style="bold yellow")
+                text.append(self._quick_select_buffer or "_", style="bold reverse")
+                text.append("  (type to match, Enter=confirm, Esc=cancel)", style="dim")
+                return text
+            
             text = Text()
             for i, (key, label) in enumerate(self.HELP_SHORTCUTS):
                 if i > 0:
@@ -1965,7 +2072,10 @@ Rules:
             if len(path_str) > 40:
                 path_str = "..." + path_str[-37:]
 
-            status.update(f" {path_str}  |  {sort_label} {order_label}  |  {visible}/{total} {hidden_label}")
+            # Show quick select mode indicator
+            mode_label = "[n:select] " if self._quick_select_mode else ""
+
+            status.update(f" {mode_label}{path_str}  |  {sort_label} {order_label}  |  {visible}/{total} {hidden_label}")
 
         def _apply_panel_widths(self) -> None:
             preview = self.query_one("#preview-panel", Vertical)
@@ -2089,6 +2199,76 @@ Rules:
                 else:
                     table.move_cursor(row=0)
 
+        def action_quick_select(self) -> None:
+            """Enter quick select mode - type to jump to matching files."""
+            self._quick_select_mode = True
+            self._quick_select_buffer = ""
+            self._highlight_shortcut("n")
+            self._update_help_bar()
+
+        def _update_help_bar(self) -> None:
+            """Update the help bar and status bar display."""
+            try:
+                help_bar = self.query_one("#help-bar", Label)
+                help_bar.update(self._get_help_bar_text())
+                self.update_status()
+            except Exception:
+                pass
+
+        def _quick_select_match(self) -> None:
+            """Find and move cursor to first entry matching the buffer."""
+            if not self._quick_select_buffer or not self._visible_entries:
+                return
+            
+            search = self._quick_select_buffer.lower()
+            table = self.query_one("#file-table", DataTable)
+            
+            for i, entry in enumerate(self._visible_entries):
+                if entry.name.lower().startswith(search):
+                    table.move_cursor(row=i)
+                    return
+
+        def _exit_quick_select(self) -> None:
+            """Exit quick select mode."""
+            self._quick_select_mode = False
+            self._quick_select_buffer = ""
+            self._update_help_bar()
+
+        def on_key(self, event) -> None:
+            """Handle key events for quick select mode."""
+            if not self._quick_select_mode:
+                return
+            
+            key = event.key
+            
+            # Stop ALL events in quick select mode to prevent shortcut conflicts
+            event.stop()
+            
+            # Exit on Escape
+            if key == "escape":
+                self._exit_quick_select()
+                return
+            
+            # Confirm on Enter
+            if key == "enter":
+                self._exit_quick_select()
+                return
+            
+            # Backspace removes last character
+            if key == "backspace":
+                if self._quick_select_buffer:
+                    self._quick_select_buffer = self._quick_select_buffer[:-1]
+                    self._update_help_bar()
+                    self._quick_select_match()
+                return
+            
+            # Add printable characters to buffer
+            if len(key) == 1 and key.isprintable():
+                self._quick_select_buffer += key
+                self._update_help_bar()
+                self._quick_select_match()
+                return
+
         def action_go_first(self) -> None:
             if isinstance(self.screen, DualPanelScreen):
                 self.screen.action_go_first()
@@ -2182,6 +2362,10 @@ Rules:
                         self.notify(f"Opened: {file_path.name}:{parts[1]}", timeout=1)
 
         def action_enter_dir(self) -> None:
+            # If in quick select mode, just exit the mode without entering directory
+            if self._quick_select_mode:
+                self._exit_quick_select()
+                return
             # If DualPanelScreen is active, delegate to it
             if isinstance(self.screen, DualPanelScreen):
                 self.screen.action_enter_dir()
@@ -2201,6 +2385,13 @@ Rules:
                     self.notify(f"/{entry.name}", timeout=1)
 
         def action_go_parent(self) -> None:
+            # If in quick select mode, handle backspace for buffer
+            if self._quick_select_mode:
+                if self._quick_select_buffer:
+                    self._quick_select_buffer = self._quick_select_buffer[:-1]
+                    self._update_help_bar()
+                    self._quick_select_match()
+                return
             if self.path.parent != self.path:
                 old_path = self.path
                 self.path = self.path.parent
