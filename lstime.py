@@ -981,11 +981,11 @@ Rules:
             text.append("r  ", style="bold")
             text.append("Refresh\n")
             text.append("p      ", style="bold")
-            text.append("Push (ahead repos)  ")
+            text.append("Push selected       ")
             text.append("s  ", style="bold")
             text.append("Cycle sort\n")
             text.append("P      ", style="bold")
-            text.append("Pull (behind repos) ")
+            text.append("Pull selected       ")
             text.append("S  ", style="bold")
             text.append("Auto-sync\n")
             text.append("Enter  ", style="bold")
@@ -1395,26 +1395,22 @@ Rules:
             self._run_git_operation(targets, "fetch", ["fetch"])
 
         def action_push_selected(self):
-            targets = []
-            for path in (self.selected if self.selected else [self._get_selected_row_path()]):
-                if path:
-                    repo = self._get_repo_by_path(path)
-                    if repo and repo.ahead > 0:
-                        targets.append(path)
+            targets = list(self.selected) if self.selected else []
+            path = self._get_selected_row_path()
+            if not targets and path:
+                targets = [path]
             if not targets:
-                self.notify("No repos ahead to push", timeout=2)
+                self.notify("No repos selected", timeout=2)
                 return
             self._run_git_operation(targets, "push", ["push"])
 
         def action_pull_selected(self):
-            targets = []
-            for path in (self.selected if self.selected else [self._get_selected_row_path()]):
-                if path:
-                    repo = self._get_repo_by_path(path)
-                    if repo and repo.behind > 0 and repo.status != "dirty":
-                        targets.append(path)
+            targets = list(self.selected) if self.selected else []
+            path = self._get_selected_row_path()
+            if not targets and path:
+                targets = [path]
             if not targets:
-                self.notify("No clean repos behind to pull", timeout=2)
+                self.notify("No repos selected", timeout=2)
                 return
             self._run_git_operation(targets, "pull", ["pull"])
 
