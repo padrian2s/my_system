@@ -36,6 +36,7 @@ Keyboard shortcuts:
   d - Delete selected file/directory
   R - Rename file/directory
   ! - AI Shell helper (generate shell script with Claude)
+  G - Git status screen (scan for repos, batch fetch/pull/push)
   Ctrl+R - Refresh directory listing
   q - Quit
   Q - Quit and sync shell to current directory
@@ -113,6 +114,7 @@ try:
     from textual.reactive import reactive
     from textual.screen import ModalScreen, Screen
     from textual.message import Message
+    from textual.coordinate import Coordinate
     from rich.text import Text
     from rich.syntax import Syntax
     from rich.console import Group
@@ -140,6 +142,19 @@ class DirEntry(NamedTuple):
     modified: datetime
     size: int
     is_dir: bool
+
+
+class GitRepoStatus(NamedTuple):
+    """Git repository status information."""
+    path: Path
+    name: str
+    branch: str
+    status: str        # "clean", "dirty", "ahead", "behind", "diverged"
+    uncommitted: int
+    ahead: int
+    behind: int
+    untracked: int
+    stash_count: int
 
 
 def get_dir_entries(path: Path = None) -> list[DirEntry]:
@@ -175,6 +190,110 @@ def get_dir_entries(path: Path = None) -> list[DirEntry]:
         pass
 
     return entries
+
+
+def find_git_repos(root_path: Path, max_depth: int = 5) -> list[Path]:
+    """Recursively find git repositories up to max_depth."""
+    repos = []
+    skip_dirs = {'node_modules', '__pycache__', '.venv', 'venv', 'vendor', '.git', 'build', 'dist'}
+
+    def scan(path: Path, depth: int):
+        if depth > max_depth:
+            return
+        try:
+            for item in path.iterdir():
+                if item.is_dir():
+                    if item.name in skip_dirs:
+                        continue
+                    if item.name == '.git':
+                        repos.append(path)
+                    else:
+                        git_dir = item / '.git'
+                        if git_dir.exists():
+                            repos.append(item)
+                        else:
+                            scan(item, depth + 1)
+        except (PermissionError, OSError):
+            pass
+
+    # Check if root itself is a git repo
+    if (root_path / '.git').exists():
+        repos.append(root_path)
+    scan(root_path, 1)
+    return repos
+
+
+def get_repo_status(repo_path: Path) -> GitRepoStatus:
+    """Get detailed git status for a repository."""
+    repo_path = repo_path.resolve()
+    
+    def run_git(args: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                ['git'] + args,
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            return result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
+
+    # Get branch name
+    branch = run_git(['rev-parse', '--abbrev-ref', 'HEAD']) or 'unknown'
+
+    # Get ahead/behind counts
+    ahead, behind = 0, 0
+    try:
+        ab_output = run_git(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'])
+        if ab_output and '\t' in ab_output:
+            parts = ab_output.split('\t')
+            ahead = int(parts[0])
+            behind = int(parts[1])
+    except (ValueError, IndexError):
+        pass
+
+    # Get status (uncommitted and untracked)
+    uncommitted, untracked = 0, 0
+    status_output = run_git(['status', '--porcelain'])
+    if status_output:
+        for line in status_output.split('\n'):
+            if line:
+                if line.startswith('??'):
+                    untracked += 1
+                else:
+                    uncommitted += 1
+
+    # Get stash count
+    stash_count = 0
+    stash_output = run_git(['stash', 'list'])
+    if stash_output:
+        stash_count = len(stash_output.split('\n'))
+
+    # Determine overall status
+    if uncommitted > 0 or untracked > 0:
+        status = "dirty"
+    elif ahead > 0 and behind > 0:
+        status = "diverged"
+    elif ahead > 0:
+        status = "ahead"
+    elif behind > 0:
+        status = "behind"
+    else:
+        status = "clean"
+
+    return GitRepoStatus(
+        path=repo_path,
+        name=repo_path.name,
+        branch=branch,
+        status=status,
+        uncommitted=uncommitted,
+        ahead=ahead,
+        behind=behind,
+        untracked=untracked,
+        stash_count=stash_count,
+    )
 
 
 def format_time(dt: datetime) -> str:
@@ -775,6 +894,579 @@ Rules:
 
         def action_cancel(self):
             self.dismiss(None)
+
+
+
+    class GitHelpDialog(ModalScreen):
+        """Help dialog for Git Status screen."""
+
+        BINDINGS = [
+            ("escape", "close", "Close"),
+            ("q", "close", "Close"),
+            ("?", "close", "Close"),
+            Binding("enter", "close", "Close", priority=True),
+        ]
+
+        CSS = """
+        GitHelpDialog {
+            align: center middle;
+            background: transparent;
+        }
+        #help-dialog {
+            width: 70;
+            height: auto;
+            max-height: 90%;
+            border: round $primary;
+            background: $surface;
+            padding: 1 2;
+            border-title-align: center;
+            border-title-color: $primary;
+            border-title-style: bold;
+        }
+        #help-content {
+            height: auto;
+        }
+        .help-section {
+            margin-bottom: 1;
+        }
+        .help-title {
+            text-style: bold;
+            color: $primary;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            dialog = Vertical(id="help-dialog")
+            dialog.border_title = "Git Status Help"
+            with dialog:
+                yield Static(self._get_help_content(), id="help-content")
+
+        def _get_help_content(self) -> Text:
+            text = Text()
+            
+            # Columns section
+            text.append("COLUMNS\n", style="bold cyan")
+            text.append("Sel        ", style="bold")
+            text.append("* = selected (Space to toggle)\n")
+            text.append("Repository ", style="bold")
+            text.append("Name of git repo directory\n")
+            text.append("Branch     ", style="bold")
+            text.append("Current branch\n")
+            text.append("Status     ", style="bold")
+            text.append("clean", style="green")
+            text.append("/")
+            text.append("dirty", style="red")
+            text.append("/")
+            text.append("ahead", style="yellow")
+            text.append("/")
+            text.append("behind", style="cyan")
+            text.append("/")
+            text.append("diverg", style="magenta")
+            text.append("\n")
+            text.append("Changes    ", style="bold")
+            text.append("M3=modified ?2=untracked\n")
+            text.append("+/-        ", style="bold")
+            text.append("+5=ahead -3=behind\n")
+            text.append("Stash      ", style="bold")
+            text.append("Number of stashes\n\n")
+
+            # Keys section
+            text.append("KEYS\n", style="bold cyan")
+            text.append("Space  ", style="bold")
+            text.append("Toggle selection    ")
+            text.append("a  ", style="bold")
+            text.append("Select all\n")
+            text.append("f      ", style="bold")
+            text.append("Fetch selected      ")
+            text.append("r  ", style="bold")
+            text.append("Refresh\n")
+            text.append("p      ", style="bold")
+            text.append("Push (ahead repos)  ")
+            text.append("s  ", style="bold")
+            text.append("Cycle sort\n")
+            text.append("P      ", style="bold")
+            text.append("Pull (behind repos) ")
+            text.append("S  ", style="bold")
+            text.append("Auto-sync\n")
+            text.append("Enter  ", style="bold")
+            text.append("Open repo           ")
+            text.append("?  ", style="bold")
+            text.append("This help\n")
+            text.append("q/Esc  ", style="bold")
+            text.append("Close\n\n")
+
+            # Auto-sync explanation
+            text.append("AUTO-SYNC (S)\n", style="bold cyan")
+            text.append("Runs: git add -A && git commit -m 'auto-sync' && git push\n")
+
+            return text
+
+        def action_close(self):
+            self.dismiss()
+
+    class GitStatusScreen(ModalScreen):
+        """Screen for viewing git repository status across directories."""
+
+        BINDINGS = [
+            ("escape", "close", "Close"),
+            ("q", "close", "Close"),
+            ("space", "toggle_select", "Select"),
+            ("a", "select_all", "All"),
+            ("r", "refresh", "Refresh"),
+            Binding("enter", "open_repo", "Open", priority=True),
+            ("f", "fetch_selected", "Fetch"),
+            ("p", "push_selected", "Push"),
+            ("P", "pull_selected", "Pull"),
+            ("s", "cycle_sort", "Sort"),
+            ("S", "auto_sync", "Sync"),
+            ("?", "show_help", "Help"),
+        ]
+
+        CSS = """
+        * {
+            scrollbar-size: 1 1;
+        }
+        GitStatusScreen {
+            align: center middle;
+            background: transparent;
+        }
+        #git-container {
+            width: 95%;
+            height: 95%;
+            background: $surface;
+            border: round $primary;
+            padding: 1 2;
+            border-title-align: left;
+            border-title-color: $primary;
+            border-title-background: $surface;
+            border-title-style: bold;
+            border-subtitle-align: right;
+            border-subtitle-color: $text-muted;
+            border-subtitle-background: $surface;
+        }
+        #status-header {
+            height: 2;
+            padding: 0 1;
+            color: $text;
+        }
+        #table-container {
+            height: 1fr;
+            border: round $border;
+            background: $background;
+            padding: 0;
+        }
+        #repo-table {
+            height: 100%;
+            background: $background;
+        }
+        #progress-container {
+            height: 3;
+            padding: 0 1;
+            display: none;
+        }
+        #progress-container.visible {
+            display: block;
+        }
+        #progress-text {
+            height: 1;
+        }
+        #help-bar {
+            height: 1;
+            background: $surface;
+            color: $text-muted;
+            text-align: center;
+            padding: 0 1;
+        }
+        DataTable > .datatable--cursor {
+            background: $primary 30%;
+        }
+        DataTable:focus > .datatable--cursor {
+            background: $primary 50%;
+        }
+        """
+
+        def __init__(self, scan_path: Path):
+            super().__init__()
+            self.scan_path = scan_path
+            self.repos: list[GitRepoStatus] = []
+            self.selected: set[Path] = set()
+            self.scanning = False
+            self.sort_mode = "name"  # name, status, branch
+
+        def compose(self) -> ComposeResult:
+            container = Vertical(id="git-container")
+            container.border_title = "Git Status"
+            container.border_subtitle = "Space:Sel  a:All  f:Fetch  p:Push  P:Pull  S:Sync  s:Sort  ?:Help  Esc:Close"
+            with container:
+                yield Static("", id="status-header")
+                with Vertical(id="table-container"):
+                    table = DataTable(id="repo-table")
+                    table.cursor_type = "row"
+                    yield table
+                with Vertical(id="progress-container"):
+                    yield Static("", id="progress-text")
+                    yield ProgressBar(id="progress-bar", total=100)
+                yield Label("", id="help-bar")
+
+        def on_mount(self):
+            table = self.query_one("#repo-table", DataTable)
+            table.add_column("", key="sel", width=3)
+            table.add_column("Repository", key="name", width=30)
+            table.add_column("Branch", key="branch", width=20)
+            table.add_column("Status", key="status", width=10)
+            table.add_column("Changes", key="changes", width=10)
+            table.add_column("+/-", key="ahead_behind", width=8)
+            table.add_column("Stash", key="stash", width=6)
+            table.focus()
+            self._start_scan()
+
+        def _start_scan(self):
+            if self.scanning:
+                return
+            self.scanning = True
+            self.repos = []
+            self.selected.clear()
+
+            header = self.query_one("#status-header", Static)
+            header.update(f"Scanning: {self.scan_path}")
+
+            progress_container = self.query_one("#progress-container")
+            progress_container.add_class("visible")
+            progress_text = self.query_one("#progress-text", Static)
+            progress_bar = self.query_one("#progress-bar", ProgressBar)
+            progress_text.update("Finding git repositories...")
+            progress_bar.update(progress=0)
+
+            def do_scan():
+                try:
+                    repo_paths = find_git_repos(self.scan_path)
+                    total = len(repo_paths)
+                    self.app.call_from_thread(progress_text.update, f"Found {total} repositories, getting status...")
+
+                    for i, repo_path in enumerate(repo_paths):
+                        status = get_repo_status(repo_path)
+                        self.repos.append(status)
+                        progress = int(((i + 1) / max(total, 1)) * 100)
+                        self.app.call_from_thread(progress_bar.update, progress=progress)
+
+                    self.app.call_from_thread(self._scan_complete)
+                except Exception as e:
+                    self.app.call_from_thread(self.notify, f"Scan error: {e}", timeout=3)
+                    self.app.call_from_thread(self._scan_complete)
+
+            thread = threading.Thread(target=do_scan, daemon=True)
+            thread.start()
+
+        def _scan_complete(self):
+            self.scanning = False
+            progress_container = self.query_one("#progress-container")
+            progress_container.remove_class("visible")
+            self._update_header()
+            self._refresh_table()
+
+        def _update_header(self):
+            header = self.query_one("#status-header", Static)
+            total = len(self.repos)
+            dirty = sum(1 for r in self.repos if r.status == "dirty")
+            ahead = sum(1 for r in self.repos if r.status in ("ahead", "diverged"))
+            behind = sum(1 for r in self.repos if r.status in ("behind", "diverged"))
+            header.update(f"Path: {self.scan_path}  |  Repos: {total}  Dirty: {dirty}  Ahead: {ahead}  Behind: {behind}")
+
+        def _refresh_table(self):
+            table = self.query_one("#repo-table", DataTable)
+            table.clear()
+
+            # Sort repos
+            sorted_repos = list(self.repos)
+            if self.sort_mode == "name":
+                sorted_repos.sort(key=lambda r: r.name.lower())
+            elif self.sort_mode == "status":
+                status_order = {"dirty": 0, "diverged": 1, "ahead": 2, "behind": 3, "clean": 4}
+                sorted_repos.sort(key=lambda r: (status_order.get(r.status, 5), r.name.lower()))
+            elif self.sort_mode == "branch":
+                sorted_repos.sort(key=lambda r: (r.branch.lower(), r.name.lower()))
+
+            for repo in sorted_repos:
+                sel = "*" if repo.path in self.selected else " "
+
+                # Format status with color
+                status_styles = {
+                    "clean": ("clean", "green"),
+                    "dirty": ("dirty", "red"),
+                    "ahead": ("ahead", "yellow"),
+                    "behind": ("behind", "cyan"),
+                    "diverged": ("diverg", "magenta"),
+                }
+                status_text, status_color = status_styles.get(repo.status, (repo.status, "white"))
+
+                # Format changes
+                changes = []
+                if repo.uncommitted > 0:
+                    changes.append(f"M{repo.uncommitted}")
+                if repo.untracked > 0:
+                    changes.append(f"?{repo.untracked}")
+                changes_text = " ".join(changes) if changes else "-"
+
+                # Format ahead/behind
+                ab_parts = []
+                if repo.ahead > 0:
+                    ab_parts.append(f"+{repo.ahead}")
+                if repo.behind > 0:
+                    ab_parts.append(f"-{repo.behind}")
+                ab_text = "/".join(ab_parts) if ab_parts else "-"
+
+                # Format stash
+                stash_text = str(repo.stash_count) if repo.stash_count > 0 else "-"
+
+                table.add_row(
+                    sel,
+                    repo.name,
+                    repo.branch,
+                    Text(status_text, style=status_color),
+                    changes_text,
+                    ab_text,
+                    stash_text,
+                    key=str(repo.path),
+                )
+
+        def _get_selected_row_path(self) -> Path | None:
+            table = self.query_one("#repo-table", DataTable)
+            if table.cursor_row is not None and table.row_count > 0:
+                try:
+                    coord = Coordinate(table.cursor_row, 0)
+                    cell_key = table.coordinate_to_cell_key(coord)
+                    return Path(cell_key.row_key.value) if cell_key.row_key else None
+                except Exception:
+                    pass
+            return None
+
+        def _get_repo_by_path(self, path: Path) -> GitRepoStatus | None:
+            for repo in self.repos:
+                if repo.path == path:
+                    return repo
+            return None
+
+        def action_close(self):
+            self.dismiss()
+
+        def action_toggle_select(self):
+            table = self.query_one("#repo-table", DataTable)
+            current_row = table.cursor_row
+            path = self._get_selected_row_path()
+            if path:
+                if path in self.selected:
+                    self.selected.discard(path)
+                else:
+                    self.selected.add(path)
+                self._refresh_table()
+                # Restore cursor and move down
+                if current_row is not None:
+                    next_row = min(current_row + 1, table.row_count - 1)
+                    table.move_cursor(row=next_row)
+
+        def action_select_all(self):
+            table = self.query_one("#repo-table", DataTable)
+            current_row = table.cursor_row
+            if len(self.selected) == len(self.repos):
+                self.selected.clear()
+            else:
+                self.selected = {r.path for r in self.repos}
+            self._refresh_table()
+            # Restore cursor position
+            if current_row is not None and table.row_count > 0:
+                table.move_cursor(row=min(current_row, table.row_count - 1))
+
+        def action_refresh(self):
+            self._start_scan()
+
+        def action_open_repo(self):
+            path = self._get_selected_row_path()
+            if path:
+                self.dismiss(path)
+
+        def action_cycle_sort(self):
+            table = self.query_one("#repo-table", DataTable)
+            current_row = table.cursor_row
+            modes = ["name", "status", "branch"]
+            current_idx = modes.index(self.sort_mode)
+            self.sort_mode = modes[(current_idx + 1) % len(modes)]
+            self.notify(f"Sort: {self.sort_mode}", timeout=1)
+            self._refresh_table()
+            # Restore cursor position
+            if current_row is not None and table.row_count > 0:
+                table.move_cursor(row=min(current_row, table.row_count - 1))
+
+
+        def action_show_help(self):
+            self.app.push_screen(GitHelpDialog())
+
+
+        def action_auto_sync(self):
+            """Add all, commit with 'auto-sync' message, and push for selected repos."""
+            targets = list(self.selected) if self.selected else []
+            path = self._get_selected_row_path()
+            if not targets and path:
+                targets = [path]
+            if not targets:
+                self.notify("No repos selected", timeout=2)
+                return
+            self._run_auto_sync(targets)
+
+        def _run_auto_sync(self, paths: list[Path]):
+            if self.scanning:
+                return
+
+            self.scanning = True
+            progress_container = self.query_one("#progress-container")
+            progress_container.add_class("visible")
+            progress_text = self.query_one("#progress-text", Static)
+            progress_bar = self.query_one("#progress-bar", ProgressBar)
+            progress_text.update("Running auto-sync...")
+            progress_bar.update(progress=0)
+
+            def do_sync():
+                total = len(paths)
+                errors = []
+                synced = 0
+                for i, path in enumerate(paths):
+                    self.app.call_from_thread(progress_text.update, f"Syncing: {path.name} ({i+1}/{total})")
+                    try:
+                        # git add -A
+                        result = subprocess.run(
+                            ['git', 'add', '-A'],
+                            cwd=str(path),
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                        if result.returncode != 0:
+                            errors.append(f"{path.name}: add failed - {result.stderr.strip()}")
+                            continue
+
+                        # git commit -m "auto-sync"
+                        result = subprocess.run(
+                            ['git', 'commit', '-m', 'auto-sync'],
+                            cwd=str(path),
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                        # returncode 1 with "nothing to commit" is ok
+                        if result.returncode != 0 and "nothing to commit" not in result.stdout:
+                            errors.append(f"{path.name}: commit failed - {result.stderr.strip()}")
+                            continue
+
+                        # git push
+                        result = subprocess.run(
+                            ['git', 'push'],
+                            cwd=str(path),
+                            capture_output=True,
+                            text=True,
+                            timeout=60
+                        )
+                        if result.returncode != 0:
+                            errors.append(f"{path.name}: push failed - {result.stderr.strip()}")
+                            continue
+
+                        synced += 1
+                    except Exception as e:
+                        errors.append(f"{path.name}: {e}")
+                    progress = int(((i + 1) / total) * 100)
+                    self.app.call_from_thread(progress_bar.update, progress=progress)
+
+                if errors:
+                    self.app.call_from_thread(self.notify, f"{len(errors)} error(s), {synced} synced", timeout=3)
+                else:
+                    self.app.call_from_thread(self.notify, f"Synced {synced} repo(s)", timeout=2)
+
+                self.app.call_from_thread(self._operation_complete)
+
+            thread = threading.Thread(target=do_sync, daemon=True)
+            thread.start()
+
+        def action_fetch_selected(self):
+            targets = list(self.selected) if self.selected else []
+            path = self._get_selected_row_path()
+            if not targets and path:
+                targets = [path]
+            if not targets:
+                self.notify("No repos selected", timeout=2)
+                return
+            self._run_git_operation(targets, "fetch", ["fetch"])
+
+        def action_push_selected(self):
+            targets = []
+            for path in (self.selected if self.selected else [self._get_selected_row_path()]):
+                if path:
+                    repo = self._get_repo_by_path(path)
+                    if repo and repo.ahead > 0:
+                        targets.append(path)
+            if not targets:
+                self.notify("No repos ahead to push", timeout=2)
+                return
+            self._run_git_operation(targets, "push", ["push"])
+
+        def action_pull_selected(self):
+            targets = []
+            for path in (self.selected if self.selected else [self._get_selected_row_path()]):
+                if path:
+                    repo = self._get_repo_by_path(path)
+                    if repo and repo.behind > 0 and repo.status != "dirty":
+                        targets.append(path)
+            if not targets:
+                self.notify("No clean repos behind to pull", timeout=2)
+                return
+            self._run_git_operation(targets, "pull", ["pull"])
+
+        def _run_git_operation(self, paths: list[Path], op_name: str, git_args: list[str]):
+            if self.scanning:
+                return
+
+            self.scanning = True
+            progress_container = self.query_one("#progress-container")
+            progress_container.add_class("visible")
+            progress_text = self.query_one("#progress-text", Static)
+            progress_bar = self.query_one("#progress-bar", ProgressBar)
+            progress_text.update(f"Running git {op_name}...")
+            progress_bar.update(progress=0)
+
+            def do_operation():
+                total = len(paths)
+                errors = []
+                for i, path in enumerate(paths):
+                    self.app.call_from_thread(progress_text.update, f"{op_name}: {path.name} ({i+1}/{total})")
+                    try:
+                        result = subprocess.run(
+                            ['git'] + git_args,
+                            cwd=str(path),
+                            capture_output=True,
+                            text=True,
+                            timeout=60
+                        )
+                        if result.returncode != 0:
+                            errors.append(f"{path.name}: {result.stderr.strip()}")
+                    except Exception as e:
+                        errors.append(f"{path.name}: {e}")
+                    progress = int(((i + 1) / total) * 100)
+                    self.app.call_from_thread(progress_bar.update, progress=progress)
+
+                if errors:
+                    self.app.call_from_thread(self.notify, f"{len(errors)} errors during {op_name}", timeout=3)
+                else:
+                    self.app.call_from_thread(self.notify, f"{op_name} complete on {total} repo(s)", timeout=2)
+
+                # Refresh status
+                self.app.call_from_thread(self._operation_complete)
+
+            thread = threading.Thread(target=do_operation, daemon=True)
+            thread.start()
+
+        def _operation_complete(self):
+            self.scanning = False
+            progress_container = self.query_one("#progress-container")
+            progress_container.remove_class("visible")
+            # Re-scan to get updated status
+            self._start_scan()
 
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1914,6 +2606,7 @@ Rules:
             Binding("R", "rename_item", "Rename"),
             Binding("o", "open_system", "Open"),
             Binding("!", "ai_shell", "AI Shell"),
+            Binding("G", "git_status", "Git Status"),
             Binding("ctrl+r", "refresh", "Refresh"),
             Binding("home", "go_first", "First", priority=True),
             Binding("end", "go_last", "Last", priority=True),
@@ -1953,6 +2646,7 @@ Rules:
             ("^F", "find"),
             ("/", "grep"),
             ("!", "AI"),
+            ("G", "git"),
             ("m", "manager"),
             ("v", "view"),
             ("t", "time"),
@@ -2484,6 +3178,21 @@ Rules:
                             break
 
             self.push_screen(AIShellDialog(self.path), handle_result)
+
+
+        def action_git_status(self) -> None:
+            self._highlight_shortcut("G")
+            def handle_result(result: Path | None):
+                if result:
+                    # Navigate to the selected repo
+                    if result.is_dir():
+                        self.path = result
+                        self.load_entries()
+                        self.refresh_table()
+                        self.update_status()
+                        self.notify(f"Opened: {result.name}", timeout=1)
+
+            self.push_screen(GitStatusScreen(self.path), handle_result)
 
         def action_refresh(self) -> None:
             table = self.query_one("#file-table", DataTable)
