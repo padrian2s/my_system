@@ -988,10 +988,12 @@ Rules:
             text.append("Pull selected       ")
             text.append("S  ", style="bold")
             text.append("Auto-sync\n")
-            text.append("Enter  ", style="bold")
-            text.append("Open repo           ")
+            text.append("g      ", style="bold")
+            text.append("Show git status     ")
             text.append("?  ", style="bold")
             text.append("This help\n")
+            text.append("Enter  ", style="bold")
+            text.append("Open repo           ")
             text.append("q/Esc  ", style="bold")
             text.append("Close\n\n")
 
@@ -1000,6 +1002,57 @@ Rules:
             text.append("Runs: git add -A && git commit -m 'auto-sync' && git push\n")
 
             return text
+
+        def action_close(self):
+            self.dismiss()
+
+
+    class GitOutputDialog(ModalScreen):
+        """Dialog showing git command output."""
+
+        BINDINGS = [
+            ("escape", "close", "Close"),
+            ("q", "close", "Close"),
+            Binding("enter", "close", "Close", priority=True),
+        ]
+
+        CSS = """
+        GitOutputDialog {
+            align: center middle;
+            background: transparent;
+        }
+        #output-dialog {
+            width: 80%;
+            height: 80%;
+            border: round $primary;
+            background: $surface;
+            padding: 1 2;
+            border-title-align: left;
+            border-title-color: $primary;
+            border-title-style: bold;
+            border-subtitle-align: right;
+            border-subtitle-color: $text-muted;
+        }
+        #output-content {
+            height: 1fr;
+            background: $background;
+            padding: 1;
+            overflow-y: auto;
+        }
+        """
+
+        def __init__(self, title: str, content: str):
+            super().__init__()
+            self.title = title
+            self.content = content
+
+        def compose(self) -> ComposeResult:
+            dialog = Vertical(id="output-dialog")
+            dialog.border_title = self.title
+            dialog.border_subtitle = "Enter/q/Esc: Close"
+            with dialog:
+                with VerticalScroll(id="output-content"):
+                    yield Static(self.content)
 
         def action_close(self):
             self.dismiss()
@@ -1019,6 +1072,7 @@ Rules:
             ("P", "pull_selected", "Pull"),
             ("s", "cycle_sort", "Sort"),
             ("S", "auto_sync", "Sync"),
+            ("g", "show_git_status", "Status"),
             ("?", "show_help", "Help"),
         ]
 
@@ -1096,7 +1150,7 @@ Rules:
         def compose(self) -> ComposeResult:
             container = Vertical(id="git-container")
             container.border_title = "Git Status"
-            container.border_subtitle = "Space:Sel  a:All  f:Fetch  p:Push  P:Pull  S:Sync  s:Sort  ?:Help  Esc:Close"
+            container.border_subtitle = "Space:Sel  f:Fetch  p:Push  P:Pull  S:Sync  g:Status  ?:Help  Esc:Close"
             with container:
                 yield Static("", id="status-header")
                 with Vertical(id="table-container"):
@@ -1299,6 +1353,25 @@ Rules:
 
         def action_show_help(self):
             self.app.push_screen(GitHelpDialog())
+
+
+        def action_show_git_status(self):
+            path = self._get_selected_row_path()
+            if not path:
+                self.notify("No repo selected", timeout=2)
+                return
+            try:
+                result = subprocess.run(
+                    ['git', 'status'],
+                    cwd=str(path),
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                output = result.stdout or result.stderr or "No output"
+                self.app.push_screen(GitOutputDialog(f"git status - {path.name}", output))
+            except Exception as e:
+                self.notify(f"Error: {e}", timeout=3)
 
 
         def action_auto_sync(self):
