@@ -1745,6 +1745,7 @@ Rules:
             ("h", "go_home", "Home"),
             ("i", "sync_panels", "Sync"),
             ("v", "view_file", "View"),
+            Binding("E", "edit_nano", "Edit"),
             ("/", "start_search", "Search"),
             Binding("home", "go_first", "First", priority=True),
             Binding("end", "go_last", "Last", priority=True),
@@ -1882,6 +1883,7 @@ Rules:
             ("/", "search"),
             ("Space", "sel"),
             ("v", "view"),
+            ("E", "edit"),
             ("c", "copy"),
             ("r", "ren"),
             ("d", "del"),
@@ -2538,6 +2540,33 @@ Rules:
 
             self.app.push_screen(FileViewerScreen(item.path))
 
+        def action_edit_nano(self):
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            if not list_view.highlighted_child:
+                self.notify("No file selected", timeout=2)
+                return
+
+            item = list_view.highlighted_child
+            if not isinstance(item, FileItem) or item.is_parent:
+                return
+
+            if item.path.is_dir():
+                self.notify("Cannot edit directory", timeout=2)
+                return
+
+            binary_extensions = {'.pdf', '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
+                               '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
+                               '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.wav', '.flac',
+                               '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+                               '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.tif'}
+            if item.path.suffix.lower() in binary_extensions:
+                self.notify("Cannot edit binary file", timeout=2)
+                return
+
+            with self.app.suspend():
+                subprocess.run(["nano", str(item.path)])
+            self.notify(f"Edited: {item.path.name}", timeout=1)
+
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # Main Application
@@ -2666,6 +2695,7 @@ Rules:
             Binding("n", "quick_select", "n=select"),
             Binding("m", "file_manager", "Manager"),
             Binding("v", "view_file", "View"),
+            Binding("E", "edit_nano", "Edit"),
             Binding("ctrl+f", "fzf_files", "Find", priority=True),
             Binding("/", "fzf_grep", "Grep", priority=True),
             Binding("tab", "toggle_focus", "Switch"),
@@ -2718,6 +2748,7 @@ Rules:
             ("G", "git"),
             ("m", "manager"),
             ("v", "view"),
+            ("E", "edit"),
             ("t", "time"),
             ("r", "rev"),
             ("h", "hidden"),
@@ -3069,6 +3100,26 @@ Rules:
                     self.push_screen(FileViewerScreen(entry.path))
                 else:
                     self.notify("Cannot view directory", timeout=2)
+
+        def action_edit_nano(self) -> None:
+            table = self.query_one("#file-table", DataTable)
+            if table.cursor_row is not None and self._visible_entries:
+                entry = self._visible_entries[table.cursor_row]
+                if entry.is_dir:
+                    self.notify("Cannot edit directory", timeout=2)
+                    return
+                binary_extensions = {'.pdf', '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
+                                   '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
+                                   '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.wav', '.flac',
+                                   '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+                                   '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.tif'}
+                if entry.path.suffix.lower() in binary_extensions:
+                    self.notify("Cannot edit binary file", timeout=2)
+                    return
+                with self.suspend():
+                    subprocess.run(["nano", str(entry.path)])
+                self.update_preview(table.cursor_row)
+                self.notify(f"Edited: {entry.name}", timeout=1)
 
         def action_fzf_files(self) -> None:
             self._highlight_shortcut("^F")
