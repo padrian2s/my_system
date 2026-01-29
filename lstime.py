@@ -5,6 +5,7 @@
 #     "textual>=0.40.0",
 #     "rich>=13.0.0",
 #     "anthropic>=0.40.0",
+#     "pyte>=0.8.2",
 # ]
 # ///
 """
@@ -42,12 +43,19 @@ Keyboard shortcuts:
   Q - Quit and sync shell to current directory
 """
 
+import asyncio
+import fcntl
 import json
 import os
+import pty
+import shlex
 import shutil
+import signal
+import struct
 import subprocess
 import sys
 import stat
+import termios
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -118,6 +126,11 @@ try:
     from rich.text import Text
     from rich.syntax import Syntax
     from rich.console import Group
+    from rich.segment import Segment
+    from textual.strip import Strip
+    from textual.widget import Widget
+    import pyte
+    import pyte.screens
     HAS_TEXTUAL = True
 except ImportError:
     HAS_TEXTUAL = False
@@ -782,6 +795,68 @@ if HAS_TEXTUAL:
             name = input_widget.value.strip()
             if name:
                 self.dismiss(name)
+            else:
+                self.dismiss(None)
+
+        def action_cancel(self):
+            self.dismiss(None)
+
+    class ShellCommandDialog(ModalScreen):
+        """Execute shell command dialog."""
+
+        BINDINGS = [
+            ("escape", "cancel", "Cancel"),
+            Binding("ctrl+y", "submit", "Submit", priority=True),
+        ]
+
+        CSS = """
+        ShellCommandDialog {
+            align: center middle;
+            background: transparent;
+        }
+        #shell-dialog {
+            width: 80%;
+            max-width: 100;
+            height: auto;
+            border: round $primary;
+            background: $surface;
+            padding: 1 2;
+            border-title-align: left;
+            border-title-color: $primary;
+            border-title-background: $surface;
+            border-title-style: bold;
+            border-subtitle-align: right;
+            border-subtitle-color: $text-muted;
+            border-subtitle-background: $surface;
+        }
+        #shell-input {
+            margin: 1 0;
+            border: round $border;
+            background: $surface;
+        }
+        #shell-input:focus {
+            border: round $primary;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            dialog = Vertical(id="shell-dialog")
+            dialog.border_title = "Shell Command"
+            dialog.border_subtitle = "^Y:Execute  Esc:Cancel"
+            with dialog:
+                yield Input(placeholder="Enter command...", id="shell-input")
+
+        def on_mount(self):
+            self.query_one("#shell-input", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted):
+            event.stop()
+
+        def action_submit(self):
+            input_widget = self.query_one("#shell-input", Input)
+            cmd = input_widget.value.strip()
+            if cmd:
+                self.dismiss(cmd)
             else:
                 self.dismiss(None)
 
@@ -1774,6 +1849,463 @@ Rules:
 
 
     # ═══════════════════════════════════════════════════════════════════════════════
+    # Terminal Emulator
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    # Default character for empty terminal cells
+    _TERM_DEFAULT_CHAR = pyte.screens.Char(
+        data=" ",
+        fg="default",
+        bg="default",
+        bold=False,
+        italics=False,
+        underscore=False,
+        strikethrough=False,
+        reverse=False,
+        blink=False,
+    )
+
+    class Terminal(Widget, can_focus=True):
+        """A terminal emulator widget that runs a shell subprocess."""
+
+        THEMES = {
+            "github-dark": {
+                "bg": "#0d1117",
+                "fg": "#c9d1d9",
+                "border": "#30363d",
+                "border_focus": "#58a6ff",
+                "black": "#484f58",
+                "red": "#ff7b72",
+                "green": "#3fb950",
+                "yellow": "#d29922",
+                "blue": "#58a6ff",
+                "magenta": "#bc8cff",
+                "cyan": "#39c5cf",
+                "white": "#b1bac4",
+                "brightblack": "#6e7681",
+                "brightred": "#ffa198",
+                "brightgreen": "#56d364",
+                "brightyellow": "#e3b341",
+                "brightblue": "#79c0ff",
+                "brightmagenta": "#d2a8ff",
+                "brightcyan": "#56d4dd",
+                "brightwhite": "#f0f6fc",
+            },
+        }
+
+        DEFAULT_CSS = """
+        Terminal {
+            padding: 0 1;
+            border: round #30363d;
+        }
+        Terminal:focus {
+            border: round #58a6ff;
+        }
+        """
+
+        cursor_visible: reactive[bool] = reactive(True)
+        _blink_state: reactive[bool] = reactive(True)
+        theme: reactive[str] = reactive("github-dark")
+
+        class Ready(Message):
+            """Posted when the terminal is ready."""
+            def __init__(self, terminal: "Terminal") -> None:
+                self.terminal = terminal
+                super().__init__()
+
+        class Closed(Message):
+            """Posted when the terminal process has closed."""
+            def __init__(self, terminal: "Terminal", exit_code: int | None) -> None:
+                self.terminal = terminal
+                self.exit_code = exit_code
+                super().__init__()
+
+        def __init__(
+            self,
+            command: str | None = None,
+            *,
+            cwd: str | None = None,
+            theme: str = "github-dark",
+            pty_state: dict | None = None,
+            name: str | None = None,
+            id: str | None = None,
+            classes: str | None = None,
+            disabled: bool = False,
+        ) -> None:
+            super().__init__(name=name, id=id, classes=classes, disabled=disabled)
+            self.theme = theme
+            self._command = command or os.environ.get("SHELL", "/bin/bash")
+            self._cwd = cwd
+            self._reader_task: asyncio.Task | None = None
+            if pty_state:
+                self._master_fd = pty_state["master_fd"]
+                self._pid = pty_state["pid"]
+                self._screen = pty_state["screen"]
+                self._stream = pty_state["stream"]
+                self._running = True
+            else:
+                self._master_fd: int | None = None
+                self._pid: int | None = None
+                self._screen: pyte.Screen | None = None
+                self._stream: pyte.Stream | None = None
+                self._running = False
+
+        def detach_pty(self) -> dict | None:
+            """Extract PTY state so the process survives widget destruction."""
+            if not self._running or self._master_fd is None:
+                return None
+            if self._reader_task:
+                self._reader_task.cancel()
+                self._reader_task = None
+            state = {
+                "master_fd": self._master_fd,
+                "pid": self._pid,
+                "screen": self._screen,
+                "stream": self._stream,
+            }
+            # Prevent on_unmount from killing the process
+            self._master_fd = None
+            self._pid = None
+            self._running = False
+            return state
+
+        @property
+        def theme_colors(self) -> dict[str, str]:
+            return self.THEMES.get(self.theme, self.THEMES["github-dark"])
+
+        def watch_theme(self, theme: str) -> None:
+            colors = self.THEMES.get(theme, self.THEMES["github-dark"])
+            self.styles.border = ("round", colors["border"])
+            self.refresh()
+
+        def on_mount(self) -> None:
+            colors = self.theme_colors
+            self.styles.border = ("round", colors["border"])
+            if not self._running:
+                self._start_terminal()
+            else:
+                # Reconnecting to existing PTY — restart the reader
+                self._reader_task = asyncio.create_task(self._read_pty())
+            self.set_interval(0.5, self._toggle_blink)
+
+        def on_unmount(self) -> None:
+            self._stop_terminal()
+
+        def _toggle_blink(self) -> None:
+            if self.has_focus:
+                self._blink_state = not self._blink_state
+                self.refresh()
+
+        def _start_terminal(self) -> None:
+            cols = max(self.size.width - 2, 80)
+            rows = max(self.size.height - 2, 24)
+
+            self._screen = pyte.Screen(cols, rows)
+            self._stream = pyte.Stream(self._screen)
+
+            self._pid, self._master_fd = pty.fork()
+
+            if self._pid == 0:
+                # Child process
+                if self._cwd:
+                    try:
+                        os.chdir(self._cwd)
+                    except OSError:
+                        pass
+                env = os.environ.copy()
+                env["TERM"] = "xterm-256color"
+                env["COLORTERM"] = "truecolor"
+                env["COLUMNS"] = str(cols)
+                env["LINES"] = str(rows)
+                shell = self._command
+                shell_name = os.path.basename(shell)
+                try:
+                    os.execvpe(shell, [shell_name], env)
+                except Exception:
+                    os._exit(1)
+            else:
+                self._set_pty_size(cols, rows)
+                flags = fcntl.fcntl(self._master_fd, fcntl.F_GETFL)
+                fcntl.fcntl(self._master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                self._running = True
+                self._reader_task = asyncio.create_task(self._read_pty())
+                self.post_message(self.Ready(self))
+
+        def _stop_terminal(self) -> None:
+            self._running = False
+            if self._reader_task:
+                self._reader_task.cancel()
+                self._reader_task = None
+            if self._master_fd is not None:
+                try:
+                    os.close(self._master_fd)
+                except OSError:
+                    pass
+                self._master_fd = None
+            if self._pid is not None:
+                try:
+                    os.kill(self._pid, signal.SIGTERM)
+                    os.waitpid(self._pid, os.WNOHANG)
+                except (OSError, ChildProcessError):
+                    pass
+                self._pid = None
+
+        def _set_pty_size(self, cols: int, rows: int) -> None:
+            if self._master_fd is not None:
+                winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                try:
+                    fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
+                except OSError:
+                    pass
+
+        async def _read_pty(self) -> None:
+            while self._running and self._master_fd is not None:
+                try:
+                    await asyncio.sleep(0.01)
+                    try:
+                        data = os.read(self._master_fd, 65536)
+                        if data:
+                            self._stream.feed(data.decode("utf-8", errors="replace"))
+                            self.refresh()
+                        else:
+                            break
+                    except BlockingIOError:
+                        import select
+                        readable, _, _ = select.select([self._master_fd], [], [], 0.05)
+                        if not readable:
+                            continue
+                except OSError:
+                    break
+                except asyncio.CancelledError:
+                    break
+            if self._running:
+                self._running = False
+                exit_code = self._get_exit_code()
+                self.post_message(self.Closed(self, exit_code))
+
+        def _get_exit_code(self) -> int | None:
+            if self._pid is None:
+                return None
+            try:
+                _, status = os.waitpid(self._pid, os.WNOHANG)
+                if os.WIFEXITED(status):
+                    return os.WEXITSTATUS(status)
+            except (OSError, ChildProcessError):
+                pass
+            return None
+
+        def send_data(self, data: str | bytes) -> None:
+            if self._master_fd is None or not self._running:
+                return
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            try:
+                os.write(self._master_fd, data)
+            except OSError:
+                pass
+
+        def on_key(self, event) -> None:
+            if not self._running or self._master_fd is None:
+                return
+            # Let ctrl+backslash pass through to close the terminal screen
+            if event.key == "ctrl+backslash":
+                return
+            event.stop()
+            event.prevent_default()
+            key_map = {
+                "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
+                "home": "\x1b[H", "end": "\x1b[F",
+                "insert": "\x1b[2~", "delete": "\x1b[3~",
+                "pageup": "\x1b[5~", "pagedown": "\x1b[6~",
+                "f1": "\x1bOP", "f2": "\x1bOQ", "f3": "\x1bOR", "f4": "\x1bOS",
+                "f5": "\x1b[15~", "f6": "\x1b[17~", "f7": "\x1b[18~", "f8": "\x1b[19~",
+                "f9": "\x1b[20~", "f10": "\x1b[21~", "f11": "\x1b[23~", "f12": "\x1b[24~",
+                "tab": "\t", "enter": "\r", "escape": "\x1b", "backspace": "\x7f",
+            }
+            key = event.key
+            if key in key_map:
+                self.send_data(key_map[key])
+            elif event.character:
+                self.send_data(event.character)
+
+        def on_resize(self, event) -> None:
+            if self._screen is None:
+                return
+            cols = max(event.size.width - 2, 1)
+            rows = max(event.size.height - 2, 1)
+            self._screen.resize(rows, cols)
+            self._set_pty_size(cols, rows)
+            self.refresh()
+
+        def on_focus(self, event) -> None:
+            self._blink_state = True
+            self.refresh()
+
+        def on_blur(self, event) -> None:
+            self.refresh()
+
+        def _get_color(self, color: str, default: str | None) -> str | None:
+            if color == "default":
+                return default
+            theme = self.theme_colors
+            color_map = {
+                "black": theme["black"], "red": theme["red"],
+                "green": theme["green"], "brown": theme["yellow"],
+                "yellow": theme["yellow"], "blue": theme["blue"],
+                "magenta": theme["magenta"], "cyan": theme["cyan"],
+                "white": theme["white"],
+                "brightblack": theme["brightblack"], "brightred": theme["brightred"],
+                "brightgreen": theme["brightgreen"], "brightbrown": theme["brightyellow"],
+                "brightyellow": theme["brightyellow"], "brightblue": theme["brightblue"],
+                "brightmagenta": theme["brightmagenta"], "brightcyan": theme["brightcyan"],
+                "brightwhite": theme["brightwhite"],
+            }
+            if color in color_map:
+                return color_map[color]
+            if len(color) == 6:
+                try:
+                    int(color, 16)
+                    return f"#{color}"
+                except ValueError:
+                    pass
+            return default
+
+        def render_line(self, y: int) -> Strip:
+            if self._screen is None:
+                return Strip.blank(self.size.width)
+            if y >= self._screen.lines:
+                return Strip.blank(self.size.width)
+            buffer = self._screen.buffer
+            line = buffer.get(y, {})
+            segments: list[Segment] = []
+            cursor_x = self._screen.cursor.x
+            cursor_y = self._screen.cursor.y
+            show_cursor = self.has_focus and self._blink_state and cursor_y == y
+            for x in range(self._screen.columns):
+                char = line.get(x, _TERM_DEFAULT_CHAR)
+                colors = self.theme_colors
+                fg = self._get_color(char.fg, colors["fg"])
+                bg = self._get_color(char.bg, None)
+                is_cursor = show_cursor and x == cursor_x
+                style = Style(
+                    color=fg,
+                    bgcolor=bg if bg else colors["bg"],
+                    bold=char.bold,
+                    italic=char.italics,
+                    underline=char.underscore,
+                    strike=char.strikethrough,
+                    reverse=is_cursor,
+                )
+                text = char.data if char.data else " "
+                segments.append(Segment(text, style))
+            return Strip(segments)
+
+
+    class TerminalScreen(ModalScreen):
+        """Fullscreen terminal emulator modal."""
+
+        BINDINGS = [
+            Binding("ctrl+backslash", "close_terminal", "Close", priority=True),
+            Binding("ctrl+t", "toggle_terminal", "Toggle", priority=True),
+        ]
+
+        DEFAULT_CSS = """
+        TerminalScreen {
+            align: center middle;
+            background: #0d1117;
+        }
+        TerminalScreen Terminal {
+            width: 100%;
+            height: 100%;
+            border: round #444;
+            border-title-color: #58a6ff;
+            border-subtitle-color: #8b949e;
+        }
+        TerminalScreen Terminal:focus {
+            border: round #58a6ff;
+        }
+        """
+
+        def __init__(self, cwd: str | None = None, pty_state: dict | None = None) -> None:
+            super().__init__()
+            self._cwd = cwd
+            self._pty_state = pty_state
+
+        def compose(self) -> ComposeResult:
+            yield Terminal(cwd=self._cwd, theme="github-dark", pty_state=self._pty_state)
+
+        def on_mount(self) -> None:
+            terminal = self.query_one(Terminal)
+            terminal.border_title = "Terminal"
+            terminal.border_subtitle = "ctrl+t toggle | ctrl+\\ close"
+            terminal.focus()
+
+        def on_terminal_closed(self, event: Terminal.Closed) -> None:
+            self.dismiss(("closed", None))
+
+        def action_toggle_terminal(self) -> None:
+            """Hide terminal but keep process alive."""
+            pty_state = self.query_one(Terminal).detach_pty()
+            self.dismiss(("toggle", pty_state))
+
+        def action_close_terminal(self) -> None:
+            """Kill terminal and close."""
+            self.dismiss(("closed", None))
+
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # Tmux Launcher — each lst gets its own tmux server (socket) for full isolation
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _lst_tmux_launch(argv: list[str], target_path: str) -> None:
+        """Launch lst inside a dedicated tmux server with C-t toggle.
+
+        Uses a separate tmux socket (-L) per path so multiple lst instances
+        don't interfere with each other or the user's main tmux.
+
+        C-t toggles between window 0 (lst) and window 1 (terminal).
+        """
+        import hashlib
+        sock = "lst_" + hashlib.md5(target_path.encode()).hexdigest()[:8]
+        tmux = ["tmux", "-L", sock]
+
+        # Check if this server already has a session
+        check = subprocess.run(tmux + ["has-session"], capture_output=True)
+        if check.returncode == 0:
+            # Already running — just attach
+            os.execvp("tmux", tmux + ["attach-session"])
+
+        # Build shell command that sets the env var so inner lst skips launcher
+        inner_cmd = "_LST_INSIDE_TMUX=1 " + " ".join(
+            shlex.quote(a) for a in argv
+        )
+
+        # Create new session: window 0 runs lst
+        subprocess.run(tmux + [
+            "new-session", "-d", "-s", "main", "-n", "lst",
+            "-c", target_path, inner_cmd,
+        ])
+
+        # Status bar
+        subprocess.run(tmux + ["set-option", "-g", "status-left",
+                        f" lst [{os.path.basename(target_path)}] "])
+        subprocess.run(tmux + ["set-option", "-g", "status-right",
+                        " C-t: toggle terminal "])
+        subprocess.run(tmux + ["set-option", "-g", "status-style",
+                        "bg=#1a1a2e,fg=#58a6ff"])
+
+        # C-t: if only 1 window, create terminal; otherwise toggle
+        toggle = (
+            'if [ $(tmux -L ' + sock + ' list-windows | wc -l) -eq 1 ]; then '
+            'tmux -L ' + sock + ' new-window -n term; '
+            'else tmux -L ' + sock + ' last-window; fi'
+        )
+        subprocess.run(tmux + ["bind-key", "-n", "C-t", "run-shell", toggle])
+
+        # Attach
+        os.execvp("tmux", tmux + ["attach-session"])
+
+    # ═══════════════════════════════════════════════════════════════════════════════
     # Dual Panel File Manager
     # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1809,7 +2341,8 @@ Rules:
             ("h", "go_home", "Home"),
             ("i", "sync_panels", "Sync"),
             ("v", "view_file", "View"),
-            Binding("E", "edit_nano", "Edit"),
+            Binding("E", "edit_nano", "Edit", priority=True),
+            Binding("!", "shell_command", "Shell", priority=True),
             ("/", "start_search", "Search"),
             Binding("home", "go_first", "First", priority=True),
             Binding("end", "go_last", "Last", priority=True),
@@ -1848,6 +2381,7 @@ Rules:
         .panel:focus-within {
             border: round $primary;
             border-title-color: $primary;
+            border-subtitle-color: $primary;
         }
         .panel-list {
             height: 1fr;
@@ -1945,21 +2479,27 @@ Rules:
                 yield Label(self._get_help_bar_text(), id="help-bar")
 
         HELP_SHORTCUTS = [
+            # Navigation
             ("/", "search"),
+            ("g", "jump"),
+            ("h", "home"),
+            ("i", "sync"),
+            # Selection
             ("Space", "sel"),
+            ("a", "all"),
+            ("n", "qsel"),
+            # File operations
             ("v", "view"),
             ("E", "edit"),
             ("c", "copy"),
-            ("r", "ren"),
             ("m", "move"),
+            ("r", "ren"),
             ("d", "del"),
             ("p", "mkdir"),
-            ("a", "all"),
+            ("!", "shell"),
+            # Display
             ("s", "sort"),
-            ("h", "home"),
-            ("i", "sync"),
-            ("g", "jump"),
-            ("n", "qsel"),
+            ("t", "term"),
         ]
 
         def _get_help_bar_text(self, highlight_key: str = None) -> Text:
@@ -2012,6 +2552,17 @@ Rules:
                 max_right = len(right_list.children) - 1
                 right_list.index = min(DualPanelScreen._session_right_index, max_right)
             left_list.focus()
+            self._update_panel_borders()
+
+        def _update_panel_borders(self):
+            left_panel = self.query_one("#left-panel", Vertical)
+            right_panel = self.query_one("#right-panel", Vertical)
+            if self.active_panel == "left":
+                left_panel.border_subtitle = "● ACTIVE"
+                right_panel.border_subtitle = ""
+            else:
+                left_panel.border_subtitle = ""
+                right_panel.border_subtitle = "● ACTIVE"
 
         def on_path_segment_clicked(self, message: PathSegment.Clicked) -> None:
             if message.panel == "left":
@@ -2175,6 +2726,7 @@ Rules:
             else:
                 self.active_panel = "left"
                 self.query_one("#left-list", ListView).focus()
+            self._update_panel_borders()
 
         def action_toggle_select(self):
             self._highlight_shortcut("space")
@@ -2230,6 +2782,7 @@ Rules:
                         DualPanelScreen._session_right_path = item.path
                     self._refresh_single_panel(self.active_panel)
                     self._save_paths_to_config()
+                    self._update_panel_borders()
 
         def action_go_up(self):
             # If in quick select mode, handle backspace for buffer
@@ -2660,6 +3213,23 @@ Rules:
 
             self.app.push_screen(MkdirDialog(), handle_mkdir)
 
+        def action_shell_command(self):
+            self._highlight_shortcut("!")
+            if self.active_panel == "left":
+                cwd = self.left_path
+            else:
+                cwd = self.right_path
+
+            def handle_shell(cmd: str | None):
+                if cmd:
+                    with self.app.suspend():
+                        subprocess.run(cmd, shell=True, cwd=str(cwd))
+                        input("\n[Press Enter to continue]")
+                    self.refresh_panels()
+                    self.notify(f"Executed: {cmd}", timeout=2)
+
+            self.app.push_screen(ShellCommandDialog(), handle_shell)
+
         def action_delete(self):
             self._highlight_shortcut("d")
             list_view = self.query_one(f"#{self.active_panel}-list", ListView)
@@ -2763,6 +3333,10 @@ Rules:
                 subprocess.run(["nano", str(item.path)])
             self.notify(f"Edited: {item.path.name}", timeout=1)
 
+        def action_terminal(self):
+            """Open terminal (handled by tmux C-t binding)."""
+            pass
+
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # Main Application
@@ -2809,6 +3383,7 @@ Rules:
         #list-panel:focus-within {
             border: round $primary;
             border-title-color: $primary;
+            border-subtitle-color: $primary;
         }
 
         DataTable {
@@ -2832,6 +3407,7 @@ Rules:
         #preview-panel:focus-within {
             border: round $primary;
             border-title-color: $primary;
+            border-subtitle-color: $primary;
         }
 
         #preview-title {
@@ -3000,6 +3576,35 @@ Rules:
             self.setup_table()
             self.refresh_table()
             self._apply_panel_widths()
+
+        def on_descendant_focus(self, event) -> None:
+            """Update panel border subtitles based on focus."""
+            try:
+                list_panel = self.query_one("#list-panel", Vertical)
+                preview_panel = self.query_one("#preview-panel", Vertical)
+            except Exception:
+                return
+            focused = self.focused
+            if focused is None:
+                return
+            # Check if focused widget is inside list-panel or preview-panel
+            node = focused
+            in_list = False
+            in_preview = False
+            while node is not None:
+                if node.id == "list-panel":
+                    in_list = True
+                    break
+                if node.id == "preview-panel":
+                    in_preview = True
+                    break
+                node = node.parent
+            if in_list:
+                list_panel.border_subtitle = "● ACTIVE"
+                preview_panel.border_subtitle = ""
+            elif in_preview:
+                list_panel.border_subtitle = ""
+                preview_panel.border_subtitle = "● ACTIVE"
 
         def load_entries(self) -> None:
             self.entries = get_dir_entries(self.path)
@@ -3371,6 +3976,7 @@ Rules:
                         self.query_one("#file-viewer", FileViewer).load_file(file_path)
                         self.notify(f"Opened: {file_path.name}:{parts[1]}", timeout=1)
 
+
         def action_enter_dir(self) -> None:
             # If in quick select mode, just exit the mode without entering directory
             if self._quick_select_mode:
@@ -3520,8 +4126,13 @@ Rules:
                 table.move_cursor(row=min(current_row, len(self._visible_entries) - 1))
             self.notify("Refreshed", timeout=1)
 
+        def action_terminal(self) -> None:
+            """Open terminal (handled by tmux C-t binding)."""
+            pass
+
         def action_quit_cd(self) -> None:
             """Quit and write current directory to temp file for shell to cd."""
+            _cleanup_tmux_toggle()
             try:
                 LASTDIR_FILE.write_text(str(self.path))
             except OSError:
@@ -3530,6 +4141,7 @@ Rules:
 
         def action_quit(self) -> None:
             """Quit and save current directory for shell cd."""
+            _cleanup_tmux_toggle()
             try:
                 LASTDIR_FILE.write_text(str(self.path))
             except OSError:
@@ -3737,6 +4349,7 @@ Options:
   -H, --hidden      Show hidden files
   --tui             Force interactive TUI mode
   --no-tui          Force non-interactive mode
+  --no-tmux         Run without tmux (no C-t terminal toggle)
   -h, --help        Show this help message
 
 Interactive TUI Shortcuts:
@@ -3796,6 +4409,7 @@ def main():
     reverse = True
     show_hidden = False
     force_tui = None
+    no_tmux = False
 
     i = 0
     while i < len(args):
@@ -3816,6 +4430,8 @@ def main():
             force_tui = True
         elif arg == "--no-tui":
             force_tui = False
+        elif arg == "--no-tmux":
+            no_tmux = True
         elif not arg.startswith("-"):
             path = Path(arg).expanduser().resolve()
         else:
@@ -3832,6 +4448,19 @@ def main():
     use_tui = force_tui if force_tui is not None else (HAS_TEXTUAL and sys.stdout.isatty())
 
     if use_tui and HAS_TEXTUAL:
+        target = str(path or Path.cwd())
+
+        # Launch inside dedicated tmux unless:
+        # - --no-tmux flag passed
+        # - already inside our dedicated tmux socket
+        # - already inside another tmux session
+        if (not no_tmux
+                and shutil.which("tmux")
+                and not os.environ.get("_LST_INSIDE_TMUX")
+                and not os.environ.get("TMUX")):
+            _lst_tmux_launch([sys.executable] + sys.argv, target)
+            # execvp in _lst_tmux_launch means we never reach here
+
         app = LstimeApp(path)
         app.sort_by = sort_by
         app.reverse_order = reverse
