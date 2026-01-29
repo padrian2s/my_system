@@ -726,6 +726,68 @@ if HAS_TEXTUAL:
         def action_cancel(self):
             self.dismiss(None)
 
+    class MkdirDialog(ModalScreen):
+        """Create directory dialog."""
+
+        BINDINGS = [
+            ("escape", "cancel", "Cancel"),
+            Binding("ctrl+y", "submit", "Submit", priority=True),
+        ]
+
+        CSS = """
+        MkdirDialog {
+            align: center middle;
+            background: transparent;
+        }
+        #mkdir-dialog {
+            width: 80%;
+            max-width: 100;
+            height: auto;
+            border: round $primary;
+            background: $surface;
+            padding: 1 2;
+            border-title-align: left;
+            border-title-color: $primary;
+            border-title-background: $surface;
+            border-title-style: bold;
+            border-subtitle-align: right;
+            border-subtitle-color: $text-muted;
+            border-subtitle-background: $surface;
+        }
+        #mkdir-input {
+            margin: 1 0;
+            border: round $border;
+            background: $surface;
+        }
+        #mkdir-input:focus {
+            border: round $primary;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            dialog = Vertical(id="mkdir-dialog")
+            dialog.border_title = "Create Directory"
+            dialog.border_subtitle = "^Y:Confirm  Esc:Cancel"
+            with dialog:
+                yield Input(placeholder="Directory name", id="mkdir-input")
+
+        def on_mount(self):
+            self.query_one("#mkdir-input", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted):
+            event.stop()
+
+        def action_submit(self):
+            input_widget = self.query_one("#mkdir-input", Input)
+            name = input_widget.value.strip()
+            if name:
+                self.dismiss(name)
+            else:
+                self.dismiss(None)
+
+        def action_cancel(self):
+            self.dismiss(None)
+
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # AI Shell Helper
@@ -1734,10 +1796,12 @@ Rules:
             ("space", "toggle_select", "Select"),
             ("backspace", "go_up", "Up"),
             ("c", "copy_selected", "Copy"),
+            ("m", "move_selected", "Move"),
             ("a", "select_all", "All"),
             ("s", "toggle_sort", "Sort"),
             Binding("R", "rename", "Rename", priority=True),
             Binding("d", "delete", "Delete", priority=True),
+            Binding("p", "mkdir", "Mkdir", priority=True),
             Binding("g", "toggle_position", "g=jump"),
             Binding("n", "quick_select", "n=select"),
             ("pageup", "page_up", "PgUp"),
@@ -1859,6 +1923,7 @@ Rules:
             self.selected_right: set[Path] = set()
             self.active_panel = "left"
             self.copying = False
+            self.moving = False
             self._quick_select_mode = False
             self._quick_select_buffer = ""
 
@@ -1886,7 +1951,9 @@ Rules:
             ("E", "edit"),
             ("c", "copy"),
             ("r", "ren"),
+            ("m", "move"),
             ("d", "del"),
+            ("p", "mkdir"),
             ("a", "all"),
             ("s", "sort"),
             ("h", "home"),
@@ -2419,9 +2486,111 @@ Rules:
                 self.selected_left.clear()
                 self.selected_right.clear()
 
+            # Reset indexes before refresh to avoid stale index issues
+            left_list.index = 0
+            right_list.index = 0
             self.refresh_panels()
 
-            # Restore cursor positions
+            # Restore cursor positions clamped to new list sizes
+            if left_index is not None:
+                new_left = min(left_index, len(left_list.children) - 1)
+                if new_left >= 0:
+                    left_list.index = new_left
+            if right_index is not None:
+                new_right = min(right_index, len(right_list.children) - 1)
+                if new_right >= 0:
+                    right_list.index = new_right
+
+            self.set_timer(2, lambda: progress_container.remove_class("visible"))
+
+        def action_move_selected(self):
+            self._highlight_shortcut("m")
+            if self.moving:
+                return
+
+            if self.active_panel == "left":
+                selected = self.selected_left.copy()
+                dest_path = self.right_path
+            else:
+                selected = self.selected_right.copy()
+                dest_path = self.left_path
+
+            used_explicit_selection = bool(selected)
+
+            if not selected:
+                list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+                if list_view.highlighted_child and isinstance(list_view.highlighted_child, FileItem):
+                    item = list_view.highlighted_child
+                    if not item.is_parent:
+                        selected = {item.path}
+
+            if not selected:
+                self.notify("No files to move", timeout=2)
+                return
+
+            items = list(selected)
+            count = len(items)
+            if count == 1:
+                message = f"Move '{items[0].name}' to {dest_path}?"
+            else:
+                message = f"Move {count} item(s) to {dest_path}?"
+
+            def handle_confirm(confirmed: bool):
+                if confirmed:
+                    self.moving = True
+                    self._move_used_explicit_selection = used_explicit_selection
+                    total = len(items)
+
+                    progress_container = self.query_one("#progress-container")
+                    progress_container.add_class("visible")
+                    progress_bar = self.query_one("#progress-bar", ProgressBar)
+                    progress_text = self.query_one("#progress-text", Static)
+                    progress_text.update(f"Moving {total} item(s)...")
+                    progress_bar.update(progress=0)
+
+                    def do_move():
+                        for i, src in enumerate(items):
+                            try:
+                                dest = dest_path / src.name
+                                self.app.call_from_thread(progress_text.update, f"Moving: {src.name} ({i+1}/{total})")
+                                self.app.call_from_thread(progress_bar.update, progress=int(((i + 0.5) / total) * 100))
+                                shutil.move(str(src), str(dest))
+                                self.app.call_from_thread(progress_bar.update, progress=int(((i + 1) / total) * 100))
+                            except Exception as e:
+                                self.app.call_from_thread(self.notify, f"Error moving {src.name}: {e}", timeout=5)
+                        self.app.call_from_thread(self._move_complete)
+
+                    thread = threading.Thread(target=do_move, daemon=True)
+                    thread.start()
+
+            self.app.push_screen(ConfirmDialog("Move", message), handle_confirm)
+
+        def _move_complete(self):
+            self.moving = False
+            progress_bar = self.query_one("#progress-bar", ProgressBar)
+            progress_text = self.query_one("#progress-text", Static)
+            progress_container = self.query_one("#progress-container")
+
+            # Save cursor positions before refresh
+            left_list = self.query_one("#left-list", ListView)
+            right_list = self.query_one("#right-list", ListView)
+            left_index = left_list.index
+            right_index = right_list.index
+
+            progress_bar.update(progress=100)
+            progress_text.update("Done!")
+            self.notify("Move complete!", timeout=2)
+
+            if getattr(self, '_move_used_explicit_selection', False):
+                self.selected_left.clear()
+                self.selected_right.clear()
+
+            # Reset indexes before refresh to avoid stale index on fewer items
+            left_list.index = 0
+            right_list.index = 0
+            self.refresh_panels()
+
+            # Restore cursor positions clamped to new list sizes
             if left_index is not None:
                 new_left = min(left_index, len(left_list.children) - 1)
                 if new_left >= 0:
@@ -2463,6 +2632,33 @@ Rules:
                         self.notify(f"Error: {e}", timeout=3)
 
             self.app.push_screen(RenameDialog(path.name), handle_rename)
+
+        def action_mkdir(self):
+            self._highlight_shortcut("p")
+            if self.active_panel == "left":
+                parent_path = self.left_path
+            else:
+                parent_path = self.right_path
+
+            list_view = self.query_one(f"#{self.active_panel}-list", ListView)
+            current_index = list_view.index
+
+            def handle_mkdir(name: str | None):
+                if name:
+                    try:
+                        new_dir = parent_path / name
+                        new_dir.mkdir(parents=True, exist_ok=False)
+                        self.notify(f"Created: {name}", timeout=2)
+                        self._refresh_single_panel(self.active_panel)
+                        new_index = min(current_index, len(list_view.children) - 1)
+                        if new_index >= 0:
+                            list_view.index = new_index
+                    except FileExistsError:
+                        self.notify(f"Already exists: {name}", timeout=3)
+                    except Exception as e:
+                        self.notify(f"Error: {e}", timeout=3)
+
+            self.app.push_screen(MkdirDialog(), handle_mkdir)
 
         def action_delete(self):
             self._highlight_shortcut("d")
