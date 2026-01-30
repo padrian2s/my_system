@@ -6,17 +6,31 @@
 
 LSTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+_LSTIME_LASTDIR_FILE="/tmp/lstime_lastdir_${USER:-user}"
+
+# Helper: run lstime TUI then cd to the last directory
+_lstime_cd() {
+    uv run "$LSTIME_DIR/lstime.py" "$@"
+    if [ -f "$_LSTIME_LASTDIR_FILE" ]; then
+        local target
+        target="$(cat "$_LSTIME_LASTDIR_FILE")"
+        if [ -d "$target" ]; then
+            cd "$target" || true
+        fi
+    fi
+}
+
 # Main lstime command (uses uv run with inline dependencies)
-alias lstime="uv run $LSTIME_DIR/lstime.py"
+lstime() { _lstime_cd "$@"; }
 
 # lsn: Interactive TUI with creation time (default)
-alias lsn="uv run $LSTIME_DIR/lstime.py --tui"
+lsn() { _lstime_cd --tui "$@"; }
 
-# Additional convenience aliases
+# Additional convenience aliases (non-TUI, no cd needed)
 alias lst="uv run $LSTIME_DIR/lstime.py --no-tui"
 alias lsta="uv run $LSTIME_DIR/lstime.py --no-tui -a"
 
-echo "lstime aliases loaded (using uv). Commands:"
+echo "lstime loaded (using uv). Commands:"
 echo "  lsn          - Interactive TUI mode"
 echo "  lstime       - Auto-detect mode"
 echo "  lst / lsta   - Quick non-interactive"

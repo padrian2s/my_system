@@ -2680,7 +2680,8 @@ Rules:
                 DualPanelScreen._session_right_index = right_list.index if right_list.index is not None else 1
                 home_key = str(DualPanelScreen._initial_start_path or Path.cwd())
                 save_session_paths(home_key, self.left_path, self.right_path)
-                self.dismiss()
+                active_path = self.left_path if self.active_panel == "left" else self.right_path
+                self.dismiss(active_path)
 
         def action_cancel_or_close(self):
             if not self.copying:
@@ -2912,6 +2913,13 @@ Rules:
             self._quick_select_mode = False
             self._quick_select_buffer = ""
             self._update_help_bar()
+
+
+        def check_action(self, action: str, parameters: tuple) -> bool | None:
+            """Disable all bindings during quick select mode so keys reach on_key."""
+            if self._quick_select_mode:
+                return False
+            return True
 
         def on_key(self, event) -> None:
             """Handle key events for quick select mode."""
@@ -3844,6 +3852,13 @@ Rules:
             self._quick_select_buffer = ""
             self._update_help_bar()
 
+
+        def check_action(self, action: str, parameters: tuple) -> bool | None:
+            """Disable all bindings during quick select mode so keys reach on_key."""
+            if self._quick_select_mode:
+                return False
+            return True
+
         def on_key(self, event) -> None:
             """Handle key events for quick select mode."""
             if not self._quick_select_mode:
@@ -3906,7 +3921,12 @@ Rules:
 
         def action_file_manager(self) -> None:
             self._highlight_shortcut("m")
-            self.push_screen(DualPanelScreen(self.path))
+            def _on_dual_panel_close(result: Path | None) -> None:
+                if result is not None:
+                    self.path = result
+                    self.load_entries()
+                    self.refresh_table()
+            self.push_screen(DualPanelScreen(self.path), callback=_on_dual_panel_close)
 
         def action_view_file(self) -> None:
             self._highlight_shortcut("v")
@@ -4148,20 +4168,20 @@ Rules:
 
         def action_quit_cd(self) -> None:
             """Quit and write current directory to temp file for shell to cd."""
-            _cleanup_tmux_toggle()
             try:
                 LASTDIR_FILE.write_text(str(self.path))
             except OSError:
                 pass
+            _cleanup_tmux_toggle()
             self.exit()
 
         def action_quit(self) -> None:
             """Quit and save current directory for shell cd."""
-            _cleanup_tmux_toggle()
             try:
                 LASTDIR_FILE.write_text(str(self.path))
             except OSError:
                 pass
+            _cleanup_tmux_toggle()
             self.exit()
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
