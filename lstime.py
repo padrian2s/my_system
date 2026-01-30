@@ -2305,6 +2305,20 @@ Rules:
         # Attach
         os.execvp("tmux", tmux + ["attach-session"])
 
+    def _cleanup_tmux_toggle() -> None:
+        """Kill the lst tmux server on quit (no-op if not inside tmux)."""
+        if not os.environ.get("_LST_INSIDE_TMUX"):
+            return
+        # The socket name is stored in $TMUX as /tmp/tmux-UID/lst_HASH,...
+        tmux_env = os.environ.get("TMUX", "")
+        if not tmux_env:
+            return
+        socket_path = tmux_env.split(",")[0]
+        sock_name = Path(socket_path).name if socket_path else ""
+        if sock_name.startswith("lst_"):
+            subprocess.run(["tmux", "-L", sock_name, "kill-server"],
+                           capture_output=True)
+
     # ═══════════════════════════════════════════════════════════════════════════════
     # Dual Panel File Manager
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -2906,19 +2920,20 @@ Rules:
             
             key = event.key
             
-            # Stop ALL events in quick select mode to prevent shortcut conflicts
+            # Prevent bindings from firing while typing in quick select
             event.stop()
-            
+            event.prevent_default()
+
             # Exit on Escape
             if key == "escape":
                 self._exit_quick_select()
                 return
-            
+
             # Confirm on Enter
             if key == "enter":
                 self._exit_quick_select()
                 return
-            
+
             # Backspace removes last character
             if key == "backspace":
                 if self._quick_select_buffer:
@@ -2926,7 +2941,7 @@ Rules:
                     self._update_help_bar()
                     self._quick_select_match()
                 return
-            
+
             # Add printable characters to buffer
             if len(key) == 1 and key.isprintable():
                 self._quick_select_buffer += key
@@ -3836,19 +3851,20 @@ Rules:
             
             key = event.key
             
-            # Stop ALL events in quick select mode to prevent shortcut conflicts
+            # Prevent bindings from firing while typing in quick select
             event.stop()
-            
+            event.prevent_default()
+
             # Exit on Escape
             if key == "escape":
                 self._exit_quick_select()
                 return
-            
+
             # Confirm on Enter
             if key == "enter":
                 self._exit_quick_select()
                 return
-            
+
             # Backspace removes last character
             if key == "backspace":
                 if self._quick_select_buffer:
@@ -3856,7 +3872,7 @@ Rules:
                     self._update_help_bar()
                     self._quick_select_match()
                 return
-            
+
             # Add printable characters to buffer
             if len(key) == 1 and key.isprintable():
                 self._quick_select_buffer += key
